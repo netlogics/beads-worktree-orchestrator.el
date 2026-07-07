@@ -1,0 +1,19 @@
+# Default orchestrator config, seeded by the beads-worktree-orchestrator skill.
+# Lives at .beads/orchestrator.yml in your project (not in the skill package),
+# since agent counts/roles are per-project. Edit freely; the skill re-reads
+# this file every time it runs and never overwrites your edits.
+
+max_parallel_agents: 3        # hard cap across all roles combined
+
+roles:
+  implementer:
+    count: 3                  # one per ready bead, up to the cap
+    default: true              # role assigned to a bead unless overridden
+
+  reviewer:
+    count: 0                  # 0 = disabled by default
+    spawn_when: "implementer closes a bead"
+
+  integrator:
+    count: 0                  # 0 = disabled by default
+    spawn_when: "2+ implementer branches are ready to merge"
