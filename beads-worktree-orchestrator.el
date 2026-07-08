@@ -2,7 +2,7 @@
 
 ;; Author: Philip Smerud
 ;; Version: see VERSION file
-;; Package-Requires: ((emacs "27.1"))
+;; Package-Requires: ((emacs "27.1") (ai-code "0"))
 ;; Keywords: tools, ai
 
 ;;; Commentary:
@@ -13,8 +13,9 @@
 ;;
 ;; - `my/spawn-agent-worktree' (alias of
 ;;   `beads-worktree-orchestrator-spawn-agent-worktree') — called by the
-;;   skill via `emacsclient --eval' to start a claude-code-ide session in a
-;;   freshly created git worktree.
+;;   skill via `emacsclient --eval' to start an ai-code CLI session (via
+;;   `ai-code-cli-start', so it follows whatever backend `ai-code-set-backend'
+;;   currently selects) in a freshly created git worktree.
 ;;
 ;; - `beads-worktree-orchestrator-install-skill' — installs or upgrades the
 ;;   bundled skill into `beads-worktree-orchestrator-skills-dir'.  Each
@@ -61,21 +62,23 @@
 
 ;;;###autoload
 (defun beads-worktree-orchestrator-spawn-agent-worktree (worktree-path)
-  "Start a claude-code-ide session rooted at WORKTREE-PATH.
+  "Start an ai-code CLI session rooted at WORKTREE-PATH.
 
 Called by the beads-worktree-orchestrator skill via `emacsclient --eval'
 once it has already run `git worktree add' for WORKTREE-PATH; this
 function only needs to launch (or reattach to) a session scoped to that
-directory.  claude-code-ide's default buffer naming derives the session's
-buffer name from the directory's basename, so naming worktrees
-descriptively (e.g. \"wt-impl-bd-42\") is what keeps
-`claude-code-ide-list-sessions' legible with several agents running."
-  (unless (require 'claude-code-ide nil t)
-    (user-error "claude-code-ide is not available"))
+directory.  It dispatches through `ai-code-cli-start' rather than calling
+a specific backend (e.g. `claude-code-ide') directly, so it launches
+whatever CLI backend the user's `ai-code-set-backend' currently selects.
+Most backends derive the session's buffer name from the directory's
+basename, so naming worktrees descriptively (e.g. \"wt-impl-bd-42\") is
+what keeps the session list legible with several agents running."
+  (unless (require 'ai-code-backends nil t)
+    (user-error "ai-code-interface.el is not available"))
   (let ((default-directory (file-name-as-directory (expand-file-name worktree-path))))
     (unless (file-directory-p default-directory)
       (user-error "Worktree does not exist: %s" default-directory))
-    (funcall (intern "claude-code-ide"))))
+    (ai-code-cli-start)))
 
 ;;;###autoload
 (defalias 'my/spawn-agent-worktree #'beads-worktree-orchestrator-spawn-agent-worktree
