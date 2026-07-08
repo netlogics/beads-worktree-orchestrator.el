@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "beads_worktree_orchestrator",
+  "project_id": "a988bd2a-2fee-4bbb-b082-5137180884e4"
+}
