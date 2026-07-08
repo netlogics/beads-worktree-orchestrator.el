@@ -24,20 +24,19 @@ You need all of these installed and working *before* this skill will do anything
 | [Beads](https://github.com/steveyegge/beads) (`bd`) | `bd --version`, and `.beads/` exists in your repo (`bd init` if not) |
 | Git | any reasonably recent version; worktrees are a standard feature |
 | Emacs with a running daemon | `emacsclient --eval '1'` should print `1` |
-| A worktree-spawn function in your Emacs config | a function (commonly named `my/spawn-agent-worktree`) that creates a vterm/`ai-code` session in a given worktree directory — this skill does not write that function for you |
+| [ai-code-interface.el](https://github.com/tninja/ai-code-interface.el) | provides `ai-code-cli-start`, the backend-agnostic dispatcher the bundled spawn function calls; pick a backend with `ai-code-set-backend` (e.g. `'claude-code-ide`, which additionally requires [claude-code-ide.el](https://github.com/manzaltu/claude-code-ide.el)) |
+| Worktree-spawn function in your Emacs config | bundled in this repo as `my/spawn-agent-worktree` (`beads-worktree-orchestrator.el`) — load it in your config; it calls `ai-code-cli-start` scoped to the given worktree directory |
 | [MCP Agent Mail](https://github.com/Dicklesworthstone/mcp_agent_mail) | installed and configured in your agent's MCP settings; the one-line installer is `curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/mcp_agent_mail/main/scripts/install.sh \| bash -s -- --yes` |
 
 If any of these are missing, the skill will stop and tell you what's missing rather than guessing or silently degrading — except that if Agent Mail specifically isn't set up, you can explicitly ask it to fall back to Beads-only coordination for that run.
 
 ## Installing
 
-Drop the whole skill folder into your Claude Code skills directory:
+**Emacs side** — load `beads-worktree-orchestrator.el` from this repo (e.g. via `straight.el`, `elpaca`, or plain `:load-path`) so `my/spawn-agent-worktree` and `beads-worktree-orchestrator-install-skill` are available.
 
-```bash
-unzip beads-worktree-orchestrator.skill -d .claude/skills/
-```
+**Skill side** — once the Emacs package above is loaded, run `M-x beads-worktree-orchestrator-install-skill` to install (or upgrade) the bundled skill into `~/.claude/skills/beads-worktree-orchestrator/`. It syncs each file independently and won't silently clobber local edits — see the function's docstring for the conflict-handling details.
 
-or, if you were handed a bare `SKILL.md` instead of the packaged `.skill` file, place it (plus the `assets/` folder) at `.claude/skills/beads-worktree-orchestrator/`.
+Without Emacs, you can still install the skill alone: drop the whole skill folder into your Claude Code skills directory (`unzip beads-worktree-orchestrator.skill -d .claude/skills/`, or place `SKILL.md` + `assets/` at `.claude/skills/beads-worktree-orchestrator/` by hand) — but you'll then need to write your own `my/spawn-agent-worktree` instead of using the bundled one.
 
 ## Configuring agent count & roles
 
@@ -83,4 +82,4 @@ Reviewers and integrators never touch code directly — this keeps attribution c
 
 - Not a replacement for Beads' own planning — Beads tracks current, actionable work, not a backlog.
 - Not a fully autonomous CI/CD pipeline — merges and cleanup of unmerged work always ask for confirmation.
-- Not tied to Claude Code specifically for the *worker* agents — the underlying stack (Beads + worktrees + Agent Mail) works with Codex, Gemini CLI, or any other CLI agent your `my/spawn-agent-worktree` function knows how to launch. This skill is what's Claude-Code-specific: it's the orchestrator's brain, not the workers'.
+- Not tied to Claude Code specifically for the *worker* agents — the underlying stack (Beads + worktrees + Agent Mail) works with whatever CLI backend `ai-code-cli-start` is currently pointed at (Claude Code, Codex, Gemini CLI, etc. — see `ai-code-set-backend`). This skill is what's Claude-Code-specific: it's the orchestrator's brain, not the workers'.
