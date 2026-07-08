@@ -1,4 +1,4 @@
----
+ ---
 name: beads-worktree-orchestrator
 description: Acts as the single orchestrator for multi-agent coding workflows that use Beads (bd) as the shared task queue, git worktrees for per-agent isolation, MCP Agent Mail for agent-to-agent coordination, and Emacs (ai-code-interface.el / claude-code-ide.el) vterm sessions as the workers. Use this skill whenever the user wants to run several AI coding agents in parallel on one repo, distribute Beads issues across worktrees, assign roles like implementer/reviewer/tester to different agents, check on or clean up parallel agent sessions, or otherwise coordinate a fleet of Claude Code / ai-code sessions instead of running one agent at a time. Trigger this even if the user just says "orchestrate the beads," "spin up a review agent too," or "spawn workers for ready tasks" without spelling out worktrees, mail, or Emacs explicitly.
 ---
@@ -56,10 +56,12 @@ Count active worktrees by role prefix (see naming below). Respect each role's `c
 ### 3. Spawn implementer(s)
 For each selected bead `bd-<id>`:
 ```bash
-git worktree add ../wt-impl-bd-<id> -b agent/impl-bd-<id>
-emacsclient --eval "(my/spawn-agent-worktree \"bd-<id>\" \"agent/impl-bd-<id>\")"
+WORKTREE_DIR="$(git rev-parse --show-toplevel)/../wt-impl-bd-<id>"
+git worktree add "$WORKTREE_DIR" -b agent/impl-bd-<id>
+emacsclient --eval "(my/spawn-agent-worktree \"$WORKTREE_DIR\")"
 bd update bd-<id> --status in_progress --assignee agent-impl-bd-<id>
 ```
+`my/spawn-agent-worktree` takes one argument, the worktree's absolute path — use an absolute path here since `emacsclient --eval` runs in the Emacs server's context, not the shell's cwd, so a relative path would resolve against the wrong directory.
 Register the agent's identity in Agent Mail (name it `impl-bd-<id>` so mail and bd IDs line up) and seed its first message/thread with the bead's `thread_id` set to `bd-<id>`, per the shared-identifier convention (`[bd-<id>]` subject prefix). This is what lets you and other agents later pull "everything related to this bead" from either system.
 
 Seed the worker's opening prompt with: the bead description (`bd show bd-<id> --json`), an instruction to run tests before closing, an instruction to close the bead itself (`bd close bd-<id> --reason "..."`), and — new — an instruction to **check its Agent Mail inbox periodically and check its thread before touching files** another agent might also be touching. If it needs to touch files outside its own worktree (shared config, generated schemas, etc.) it should call the file-reservation tool with a TTL before editing, and mail the bead's thread if it's blocked on something another agent owns.
