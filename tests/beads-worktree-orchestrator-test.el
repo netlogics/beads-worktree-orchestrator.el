@@ -416,6 +416,44 @@ check inside `claude-code-ide--start-if-no-session')."
                                 (buffer-string))
                              "changed\n")))))))))
 
+(ert-deftest bwo-test-spawn-reviewer-sanitizes-slash-in-branch ()
+  ;; my/spawn-agent-worktree always creates branches like
+  ;; "agent/impl-bd-<id>" -- this is the realistic case, not an edge case.
+  ;; "review-" + that branch must not be treated as a nested path by
+  ;; expand-file-name.
+  (bwo-test--with-temp-dir root
+    (bwo-test--with-temp-dir repo-parent
+      (let* ((ai-code-git-worktree-root root)
+             (repo-root (expand-file-name "my-repo/" repo-parent))
+             (branch "agent/impl-bd-42"))
+        (make-directory repo-root t)
+        (bwo-test--git repo-root "init" "-q" "-b" "main" ".")
+        (bwo-test--git repo-root "config" "user.email" "test@example.com")
+        (bwo-test--git repo-root "config" "user.name" "Test")
+        (bwo-test--write-file (expand-file-name "f.txt" repo-root) "hi\n")
+        (bwo-test--git repo-root "add" "f.txt")
+        (bwo-test--git repo-root "commit" "-q" "-m" "init")
+        (bwo-test--git repo-root "checkout" "-q" "-b" branch)
+        (bwo-test--write-file (expand-file-name "f.txt" repo-root) "changed\n")
+        (bwo-test--git repo-root "add" "f.txt")
+        (bwo-test--git repo-root "commit" "-q" "-m" "impl work")
+        (bwo-test--git repo-root "checkout" "-q" "main")
+        (let* ((repo-worktree-root (expand-file-name "my-repo" root))
+               (expected-path (expand-file-name "review-agent-impl-bd-42" repo-worktree-root))
+               (nested-path (expand-file-name "review-agent/impl-bd-42" repo-worktree-root)))
+          (cl-letf (((symbol-function 'beads-worktree-orchestrator--start-worker-session)
+                     (lambda () "session-started"))
+                    ((symbol-function 'require)
+                     (lambda (feature &rest _) feature)))
+            (let ((result (beads-worktree-orchestrator-spawn-reviewer repo-root branch)))
+              (should (file-directory-p expected-path))
+              (should-not (file-directory-p nested-path))
+              (should (string-match-p (regexp-quote expected-path) result))
+              ;; Flat directory: its parent is the repo's worktree root,
+              ;; not an intermediate "review-agent" directory.
+              (should (equal (file-name-directory (directory-file-name expected-path))
+                             (file-name-as-directory repo-worktree-root))))))))))
+
 (ert-deftest bwo-test-spawn-reviewer-errors-if-worktree-exists ()
   (bwo-test--with-temp-dir root
     (bwo-test--with-temp-dir repo-parent

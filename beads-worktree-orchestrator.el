@@ -293,9 +293,19 @@ also makes `git worktree list' visually distinguish review worktrees
 The worktree is created under `ai-code-git-worktree-root', using the same
 ROOT/REPO-NAME/<name> convention as
 `beads-worktree-orchestrator--worktree-path', but named
-\"review-BRANCH\" rather than BRANCH itself, so it cannot collide with the
-implementer's own worktree path and is identifiable at a glance in
-`git worktree list'.
+\"review-BRANCH-WITH-SLASHES-REPLACED-BY-DASHES\" rather than BRANCH
+itself, so it cannot collide with the implementer's own worktree path
+and is identifiable at a glance in `git worktree list'. BRANCH is
+sanitized (every \"/\" replaced with \"-\") before being folded into
+this name: real branches spawned by
+`beads-worktree-orchestrator-spawn-agent-worktree' always look like
+\"agent/impl-bd-<id>\", and passing that through unsanitized would make
+`expand-file-name' treat \"review-agent/impl-bd-<id>\" as a *nested*
+path (a \"review-agent\" directory containing \"impl-bd-<id>\") rather
+than a flat sibling directory — nesting it one level inside the
+implementer's own path and making the two worktrees' last path segment
+identical, which is exactly what `ai-code' derives session buffer names
+from.
 
 Returns a string describing what happened (worktree path, reviewed
 branch and sha, and the session-start result), mirroring
@@ -305,7 +315,7 @@ branch and sha, and the session-start result), mirroring
   (require 'ai-code-git)
   (let* ((repo-root (file-name-as-directory (expand-file-name repo-root)))
          (sha (beads-worktree-orchestrator--head-sha repo-root branch))
-         (review-name (concat "review-" branch))
+         (review-name (concat "review-" (replace-regexp-in-string "/" "-" branch)))
          (worktree-path (beads-worktree-orchestrator--worktree-path repo-root review-name)))
     (when (file-directory-p worktree-path)
       (user-error "Worktree already exists: %s" worktree-path))
