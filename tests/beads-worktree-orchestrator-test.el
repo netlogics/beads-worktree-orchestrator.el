@@ -244,6 +244,111 @@ entirely inside disposable temp directories."
         ;; Git-tracked path relies on history, not a .bak backup.
         (should-not (file-exists-p backup))))))
 
+;;; ---------------------------------------------------------------------
+;;; --start-worker-session: claude-code-ide bypass
+;;; ---------------------------------------------------------------------
+
+;; The real `ai-code' / `claude-code-ide' packages aren't loadable in this
+;; batch test context, so stub just enough of their API surface for
+;; `beads-worktree-orchestrator--start-worker-session' to call into.
+;; Tests below override these with `cl-letf' to record what got called.
+
+(defvar ai-code-selected-backend 'claude-code
+  "Stub for tests; the real definition lives in ai-code-backends.el.")
+
+(defun ai-code--effective-backend ()
+  "Stub for tests; overridden per-test via `cl-letf'."
+  ai-code-selected-backend)
+
+(defun ai-code--activate-effective-backend ()
+  "Stub for tests; overridden per-test via `cl-letf'.")
+
+(defun ai-code--remember-current-backend-for-repo ()
+  "Stub for tests; overridden per-test via `cl-letf'.")
+
+(defun ai-code-cli-start ()
+  "Stub for tests; overridden per-test via `cl-letf'.
+Real implementation lives in ai-code-backends.el and itself dispatches to
+`claude-code-ide--start-if-no-session' for the claude-code-ide backend —
+the buggy wrapper `beads-worktree-orchestrator--start-worker-session' is
+meant to bypass, which is exactly why tests assert this stub is NOT
+called when the effective backend is `claude-code-ide'.")
+
+(defun claude-code-ide ()
+  "Stub for tests; overridden per-test via `cl-letf'.")
+
+(defvar claude-code-ide-cli-extra-flags nil
+  "Stub for tests; the real definition lives in claude-code-ide.el.
+Must be declared `defvar' (special) here, not just `let'-bound, since
+`beads-worktree-orchestrator--start-worker-session' dynamically rebinds
+it and tests need that rebinding to actually take effect.")
+
+(defmacro bwo-test--with-call-log (log-var &rest body)
+  "Bind LOG-VAR to a list of call markers pushed onto during BODY."
+  (declare (indent 1))
+  `(let ((,log-var nil))
+     ,@body))
+
+(ert-deftest bwo-test-start-worker-session-uses-claude-code-ide-directly ()
+  "When the effective backend is `claude-code-ide', call it directly,
+bypassing `ai-code-cli-start' (and hence the buggy has-active-session-p
+check inside `claude-code-ide--start-if-no-session')."
+  (bwo-test--with-call-log calls
+    (cl-letf (((symbol-function 'ai-code--effective-backend)
+               (lambda () 'claude-code-ide))
+              ((symbol-function 'ai-code--activate-effective-backend)
+               (lambda () (push 'activate calls)))
+              ((symbol-function 'ai-code--remember-current-backend-for-repo)
+               (lambda () (push 'remember calls)))
+              ((symbol-function 'claude-code-ide)
+               (lambda () (push 'claude-code-ide-direct calls)))
+              ((symbol-function 'ai-code-cli-start)
+               (lambda () (push 'ai-code-cli-start calls)))
+              (beads-worktree-orchestrator-worker-permission-mode nil))
+      (beads-worktree-orchestrator--start-worker-session)
+      (should (memq 'claude-code-ide-direct calls))
+      (should-not (memq 'ai-code-cli-start calls))
+      (should (memq 'activate calls))
+      (should (memq 'remember calls)))))
+
+(ert-deftest bwo-test-start-worker-session-uses-ai-code-cli-start-for-other-backends ()
+  "For any backend other than `claude-code-ide', keep using the generic
+`ai-code-cli-start' path — don't special-case other backends."
+  (bwo-test--with-call-log calls
+    (cl-letf (((symbol-function 'ai-code--effective-backend)
+               (lambda () 'claude-code))
+              ((symbol-function 'ai-code--activate-effective-backend)
+               (lambda () (push 'activate calls)))
+              ((symbol-function 'ai-code--remember-current-backend-for-repo)
+               (lambda () (push 'remember calls)))
+              ((symbol-function 'claude-code-ide)
+               (lambda () (push 'claude-code-ide-direct calls)))
+              ((symbol-function 'ai-code-cli-start)
+               (lambda () (push 'ai-code-cli-start calls)))
+              (beads-worktree-orchestrator-worker-permission-mode nil))
+      (beads-worktree-orchestrator--start-worker-session)
+      (should (memq 'ai-code-cli-start calls))
+      (should-not (memq 'claude-code-ide-direct calls)))))
+
+(ert-deftest bwo-test-start-worker-session-pre-approves-permissions-on-direct-path ()
+  "The `--permission-mode' pre-approval flag still applies when the direct
+`claude-code-ide' path is taken, not just the `ai-code-cli-start' path."
+  (bwo-test--with-call-log calls
+    (let ((claude-code-ide-cli-extra-flags ""))
+      (cl-letf (((symbol-function 'ai-code--effective-backend)
+                 (lambda () 'claude-code-ide))
+                ((symbol-function 'ai-code--activate-effective-backend)
+                 (lambda ()))
+                ((symbol-function 'ai-code--remember-current-backend-for-repo)
+                 (lambda ()))
+                ((symbol-function 'claude-code-ide)
+                 (lambda () (push claude-code-ide-cli-extra-flags calls)))
+                ((symbol-function 'ai-code-cli-start)
+                 (lambda () (push 'ai-code-cli-start calls)))
+                (beads-worktree-orchestrator-worker-permission-mode "bypassPermissions"))
+        (beads-worktree-orchestrator--start-worker-session)
+        (should (member "--permission-mode bypassPermissions" calls))))))
+
 (provide 'beads-worktree-orchestrator-test)
 
 ;;; beads-worktree-orchestrator-test.el ends here

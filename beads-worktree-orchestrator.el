@@ -14,8 +14,10 @@
 ;; - `my/spawn-agent-worktree' (alias of
 ;;   `beads-worktree-orchestrator-spawn-agent-worktree') — called by the
 ;;   skill via `emacsclient --eval' to create a git worktree for a branch
-;;   and start an ai-code CLI session in it (via `ai-code-cli-start', so
-;;   it follows whatever backend `ai-code-set-backend' currently selects).
+;;   and start an ai-code CLI session in it (via `ai-code-cli-start' for
+;;   most backends — or, for `claude-code-ide', directly via `claude-code-ide'
+;;   to work around a bug in its "already running" check — so it follows
+;;   whatever backend `ai-code-set-backend' currently selects).
 ;;   Worktrees are created under `ai-code-git-worktree-root', the same
 ;;   location `ai-code-git-worktree-branch' uses for worktrees created by
 ;;   hand — intentionally, so there is one worktree root, not two
@@ -123,6 +125,20 @@ bounded only by their own isolated git worktree."
                         "show-ref" "--verify" "--quiet"
                         (concat "refs/heads/" branch))))
 
+(declare-function claude-code-ide "claude-code-ide" (&optional arg))
+(declare-function ai-code--effective-backend "ai-code-backends" ())
+(declare-function ai-code--activate-effective-backend "ai-code-backends" ())
+(declare-function ai-code--remember-current-backend-for-repo "ai-code-backends" ())
+
+(defun beads-worktree-orchestrator--claude-code-ide-active-p ()
+  "Non-nil if the effective `ai-code' backend is `claude-code-ide'.
+
+Assumes `ai-code--activate-effective-backend' has already been run for the
+current context, same as `ai-code-cli-start' requires before checking what
+backend is active."
+  (and (fboundp 'ai-code--effective-backend)
+       (eq (ai-code--effective-backend) 'claude-code-ide)))
+
 (defun beads-worktree-orchestrator--start-worker-session ()
   "Start an ai-code session in `default-directory' for a spawned worker.
 
@@ -130,15 +146,39 @@ Pre-approves permissions per `beads-worktree-orchestrator-worker-permission-mode
 when the active `ai-code' backend is `claude-code-ide' — the only backend
 this currently knows how to pre-approve for, since `claude-code-ide-cli-extra-flags'
 is specific to that package. Other backends fall back to whatever their
-own default (normal, blocking) prompting behavior is."
-  (if (and beads-worktree-orchestrator-worker-permission-mode
-           (boundp 'claude-code-ide-cli-extra-flags))
-      (let ((claude-code-ide-cli-extra-flags
-             (string-trim (concat claude-code-ide-cli-extra-flags
-                                   " --permission-mode "
-                                   beads-worktree-orchestrator-worker-permission-mode))))
-        (ai-code-cli-start))
-    (ai-code-cli-start)))
+own default (normal, blocking) prompting behavior is.
+
+When the effective backend is `claude-code-ide', this calls `claude-code-ide'
+directly instead of going through `ai-code-cli-start'. `ai-code-cli-start'
+dispatches to that backend's `:start' function, `claude-code-ide--start-if-no-session',
+whose \"is a session already running\" check is keyed off MCP session context
+tied to Emacs's currently focused buffer rather than `default-directory' —
+so it can wrongly report \"already running\" for a worktree that has never
+had a session started in it, if some unrelated buffer happens to look
+active. Calling `claude-code-ide' directly bypasses that buggy check, while
+still replicating `ai-code-cli-start''s other bookkeeping (activating the
+effective backend beforehand, remembering it for the repo afterward) so
+that side of the behavior stays the same regardless of which path is
+taken. Other backends are unaffected by this bug and keep using
+`ai-code-cli-start' as the generic path."
+  (when (fboundp 'ai-code--activate-effective-backend)
+    (ai-code--activate-effective-backend))
+  (let ((claude-code-ide-p (beads-worktree-orchestrator--claude-code-ide-active-p)))
+    (prog1
+        (if (and beads-worktree-orchestrator-worker-permission-mode
+                 (boundp 'claude-code-ide-cli-extra-flags))
+            (let ((claude-code-ide-cli-extra-flags
+                   (string-trim (concat claude-code-ide-cli-extra-flags
+                                         " --permission-mode "
+                                         beads-worktree-orchestrator-worker-permission-mode))))
+              (if claude-code-ide-p
+                  (claude-code-ide)
+                (ai-code-cli-start)))
+          (if claude-code-ide-p
+              (claude-code-ide)
+            (ai-code-cli-start)))
+      (when (fboundp 'ai-code--remember-current-backend-for-repo)
+        (ai-code--remember-current-backend-for-repo)))))
 
 (defun beads-worktree-orchestrator--worktree-path (repo-root branch)
   "Path for a worktree of BRANCH off REPO-ROOT, under `ai-code-git-worktree-root'.
