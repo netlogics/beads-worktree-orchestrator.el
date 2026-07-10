@@ -70,6 +70,14 @@ Edit `.beads/orchestrator.yml` directly to change agent counts or turn on `revie
 
 Reviewers and integrators never touch code directly — this keeps attribution clean and prevents two agents fighting over the same files.
 
+## Worker permission prompts
+
+By default, spawned workers (implementer/reviewer/integrator) prompt for permission on every Bash command and file edit, same as any manual Claude Code session — and since nobody is watching an unattended worker's session, it will simply stall on its first one. This is intentional: **secure by default**.
+
+To let workers run unattended, set `BEADS_WORKTREE_ORCHESTRATOR_UNSAFE_WORKER_PERMISSIONS` to a non-empty value *before* this package loads (before starting/restarting your Emacs daemon). This is deliberately an environment variable, not a function argument or a flag the skill can pass at spawn time — `my/spawn-agent-worktree` is invoked via `emacsclient --eval`, a channel an LLM agent can drive from untrusted content (a bd issue description, a prompt-injected file). If bypassing permissions were a call-time parameter, anything that can influence that call could flip a worker into no-approval mode. Requiring a real environment variable set outside that path means enabling this is always a deliberate, out-of-band action.
+
+Once enabled, only spawned-worker sessions are affected — your own manual `ai-code-menu` sessions still prompt normally. The safety model then rests entirely on worktree isolation: a worker can only damage its own throwaway worktree/branch, which gets removed when the orchestrator's done with it.
+
 ## Safety guarantees
 
 - Never force-deletes a worktree or branch with unmerged commits without asking you first.

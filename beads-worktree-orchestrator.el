@@ -57,6 +57,60 @@
   '("SKILL.md" "README.md" "assets/orchestrator.default.yml")
   "Files making up the installable skill payload, relative to the package dir.")
 
+(defconst beads-worktree-orchestrator-unsafe-worker-permissions-envvar
+  "BEADS_WORKTREE_ORCHESTRATOR_UNSAFE_WORKER_PERMISSIONS"
+  "Environment variable that opts spawned workers into bypassed permissions.
+
+See `beads-worktree-orchestrator-worker-permission-mode' for what this
+controls and why it's an env var rather than a function argument.")
+
+(defcustom beads-worktree-orchestrator-worker-permission-mode
+  (when (getenv beads-worktree-orchestrator-unsafe-worker-permissions-envvar)
+    "bypassPermissions")
+  "Permission mode passed to spawned worker sessions via `--permission-mode'.
+
+Secure by default: nil, meaning spawned workers get normal (blocking)
+permission prompting, same as any manual session — which in practice
+means they will stall on their first Bash command or file edit, since
+nobody is watching an unattended worker's session to answer \"Do you want
+to proceed? 1. Yes...\". To opt in to workers running unattended, set the
+environment variable named by
+`beads-worktree-orchestrator-unsafe-worker-permissions-envvar'
+\(BEADS_WORKTREE_ORCHESTRATOR_UNSAFE_WORKER_PERMISSIONS\) to a non-empty
+value *before* this package is loaded (e.g. before starting/restarting
+the Emacs daemon, or before `(require \\='beads-worktree-orchestrator)'
+runs) — this variable's default is computed once, at load time, from
+that environment.
+
+This is deliberately NOT exposed as a function argument anywhere in this
+package. `beads-worktree-orchestrator-spawn-agent-worktree' is invoked via
+`emacsclient --eval', a channel that can be driven by an LLM agent acting
+on untrusted content (a bd issue description, a prompt-injected file, a
+compromised sub-agent). If bypassing permissions were a parameter of that
+call, anything that can influence what gets passed into that `--eval'
+form could silently flip a spawned worker into unattended/no-approval
+mode. Requiring a real environment variable, set through a channel this
+package's own arguments cannot reach, means the *only* way to enable this
+is a deliberate action outside the automated path altogether.
+
+Once enabled, this is applied only to sessions this package spawns, via a
+dynamic `let' around the session-start call — not a global `setq' — so
+manually-started `ai-code-menu' sessions still prompt normally regardless
+of this setting. And it only takes effect when the active `ai-code'
+backend is `claude-code-ide' (the only backend this package currently
+knows how to pre-approve for); see
+`beads-worktree-orchestrator--start-worker-session'.
+
+You can also set this directly (via `setq' or Customize) instead of/in
+addition to the environment variable, for persistent local configuration
+— it carries the exact same security caveat either way: only set it if
+you accept that spawned workers will run with no approval gate at all,
+bounded only by their own isolated git worktree."
+  :type '(choice (const :tag "Bypass all permission checks (unsafe)" "bypassPermissions")
+                  (const :tag "Normal prompting (workers will stall on prompts)" nil)
+                  (string :tag "Other claude --permission-mode value"))
+  :group 'beads-worktree-orchestrator)
+
 (cl-defstruct beads-worktree-orchestrator--sync-result
   relpath action detail)
 
@@ -68,6 +122,23 @@
   (zerop (call-process "git" nil nil nil "-C" repo-root
                         "show-ref" "--verify" "--quiet"
                         (concat "refs/heads/" branch))))
+
+(defun beads-worktree-orchestrator--start-worker-session ()
+  "Start an ai-code session in `default-directory' for a spawned worker.
+
+Pre-approves permissions per `beads-worktree-orchestrator-worker-permission-mode'
+when the active `ai-code' backend is `claude-code-ide' — the only backend
+this currently knows how to pre-approve for, since `claude-code-ide-cli-extra-flags'
+is specific to that package. Other backends fall back to whatever their
+own default (normal, blocking) prompting behavior is."
+  (if (and beads-worktree-orchestrator-worker-permission-mode
+           (boundp 'claude-code-ide-cli-extra-flags))
+      (let ((claude-code-ide-cli-extra-flags
+             (string-trim (concat claude-code-ide-cli-extra-flags
+                                   " --permission-mode "
+                                   beads-worktree-orchestrator-worker-permission-mode))))
+        (ai-code-cli-start))
+    (ai-code-cli-start)))
 
 (defun beads-worktree-orchestrator--worktree-path (repo-root branch)
   "Path for a worktree of BRANCH off REPO-ROOT, under `ai-code-git-worktree-root'.
@@ -99,10 +170,10 @@ caller driving this via `emacsclient --eval' — e.g. the orchestrator
 skill — sees output equivalent to what a separate `git worktree add'
 shell command plus a session-start call would have shown, in one line.
 
-Once the worktree exists, this dispatches through `ai-code-cli-start'
-rather than calling a specific backend (e.g. `claude-code-ide') directly,
-so it launches whatever CLI backend the user's `ai-code-set-backend'
-currently selects.
+Once the worktree exists, this starts the session via
+`beads-worktree-orchestrator--start-worker-session', which pre-approves
+permissions per `beads-worktree-orchestrator-worker-permission-mode' so
+an unattended worker doesn't stall on its first interactive prompt.
 
 Worktree location: worktrees are created under `ai-code-git-worktree-root'
 using the exact same ROOT/REPO-NAME/BRANCH layout `ai-code-git-worktree-branch'
@@ -135,7 +206,7 @@ on how they were created."
       (format "Created worktree %s (branch %s%s); %s"
               worktree-path branch
               (if branch-exists ", reusing existing branch" "")
-              (ai-code-cli-start)))))
+              (beads-worktree-orchestrator--start-worker-session)))))
 
 ;;;###autoload
 (defalias 'my/spawn-agent-worktree #'beads-worktree-orchestrator-spawn-agent-worktree
