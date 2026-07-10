@@ -13,9 +13,13 @@
 ;;
 ;; - `my/spawn-agent-worktree' (alias of
 ;;   `beads-worktree-orchestrator-spawn-agent-worktree') — called by the
-;;   skill via `emacsclient --eval' to start an ai-code CLI session (via
-;;   `ai-code-cli-start', so it follows whatever backend `ai-code-set-backend'
-;;   currently selects) in a freshly created git worktree.
+;;   skill via `emacsclient --eval' to create a git worktree for a branch
+;;   and start an ai-code CLI session in it (via `ai-code-cli-start', so
+;;   it follows whatever backend `ai-code-set-backend' currently selects).
+;;   Worktrees are created under `ai-code-git-worktree-root', the same
+;;   location `ai-code-git-worktree-branch' uses for worktrees created by
+;;   hand — intentionally, so there is one worktree root, not two
+;;   conventions drifting apart. See the function's docstring for details.
 ;;
 ;; - `beads-worktree-orchestrator-install-skill' — installs or upgrades the
 ;;   bundled skill into `beads-worktree-orchestrator-skills-dir'.  Each
@@ -60,25 +64,78 @@
 ;;; Agent spawning
 ;;; ---------------------------------------------------------------------
 
-;;;###autoload
-(defun beads-worktree-orchestrator-spawn-agent-worktree (worktree-path)
-  "Start an ai-code CLI session rooted at WORKTREE-PATH.
+(defun beads-worktree-orchestrator--branch-exists-p (repo-root branch)
+  (zerop (call-process "git" nil nil nil "-C" repo-root
+                        "show-ref" "--verify" "--quiet"
+                        (concat "refs/heads/" branch))))
 
-Called by the beads-worktree-orchestrator skill via `emacsclient --eval'
-once it has already run `git worktree add' for WORKTREE-PATH; this
-function only needs to launch (or reattach to) a session scoped to that
-directory.  It dispatches through `ai-code-cli-start' rather than calling
-a specific backend (e.g. `claude-code-ide') directly, so it launches
-whatever CLI backend the user's `ai-code-set-backend' currently selects.
-Most backends derive the session's buffer name from the directory's
-basename, so naming worktrees descriptively (e.g. \"wt-impl-bd-42\") is
-what keeps the session list legible with several agents running."
+(defun beads-worktree-orchestrator--worktree-path (repo-root branch)
+  "Path for a worktree of BRANCH off REPO-ROOT, under `ai-code-git-worktree-root'.
+
+Deliberately mirrors the private `ai-code--git-worktree-repo-dir' /
+`ai-code-git-worktree-branch' layout (ROOT/REPO-NAME/BRANCH) instead of
+reimplementing an independent convention — see the spawn function's
+docstring for why this integration is intentional."
+  (expand-file-name branch
+                     (expand-file-name (file-name-nondirectory (directory-file-name repo-root))
+                                        ai-code-git-worktree-root)))
+
+;;;###autoload
+(defun beads-worktree-orchestrator-spawn-agent-worktree (repo-root branch &optional start-point)
+  "Create a git worktree for BRANCH off REPO-ROOT and start an ai-code session in it.
+
+Called by the beads-worktree-orchestrator skill via `emacsclient --eval'.
+Unlike earlier versions of this function, it creates the worktree itself
+rather than expecting the caller to have already run `git worktree add'
+— see \"Worktree location\" below for why, and why the location it picks
+is not arbitrary.
+
+If BRANCH already exists, the existing branch is checked out into the
+new worktree instead of erroring (mirroring `ai-code-git-worktree-branch').
+START-POINT, if given, is the ref the new branch is created from; it is
+ignored when BRANCH already exists.  Returns a string describing what
+happened (worktree path, branch, and the session-start result), so a
+caller driving this via `emacsclient --eval' — e.g. the orchestrator
+skill — sees output equivalent to what a separate `git worktree add'
+shell command plus a session-start call would have shown, in one line.
+
+Once the worktree exists, this dispatches through `ai-code-cli-start'
+rather than calling a specific backend (e.g. `claude-code-ide') directly,
+so it launches whatever CLI backend the user's `ai-code-set-backend'
+currently selects.
+
+Worktree location: worktrees are created under `ai-code-git-worktree-root'
+using the exact same ROOT/REPO-NAME/BRANCH layout `ai-code-git-worktree-branch'
+uses for worktrees created by hand via `ai-code-menu'.  This is
+intentional, not a coincidence of shared defaults: it means there is one
+worktree root to look at, clean up, and reason about, regardless of
+whether a given worktree was spawned by this orchestrator or created
+manually — instead of two conventions (\"sibling of repo root\" vs.
+\"centralized under ai-code-git-worktree-root\") silently diverging over
+time and leaving worktrees scattered in two different places depending
+on how they were created."
   (unless (require 'ai-code-backends nil t)
     (user-error "ai-code-interface.el is not available"))
-  (let ((default-directory (file-name-as-directory (expand-file-name worktree-path))))
-    (unless (file-directory-p default-directory)
-      (user-error "Worktree does not exist: %s" default-directory))
-    (ai-code-cli-start)))
+  (require 'ai-code-git)
+  (let* ((repo-root (file-name-as-directory (expand-file-name repo-root)))
+         (branch-exists (beads-worktree-orchestrator--branch-exists-p repo-root branch))
+         (worktree-path (beads-worktree-orchestrator--worktree-path repo-root branch)))
+    (when (file-directory-p worktree-path)
+      (user-error "Worktree already exists: %s" worktree-path))
+    (make-directory (file-name-directory (directory-file-name worktree-path)) t)
+    (with-temp-buffer
+      (let ((exit (apply #'call-process "git" nil t nil "-C" repo-root "worktree" "add"
+                          (if branch-exists
+                              (list worktree-path branch)
+                            (append (list "-b" branch worktree-path)
+                                    (when start-point (list start-point)))))))
+        (unless (zerop exit)
+          (user-error "git worktree add failed: %s" (string-trim (buffer-string))))))
+    (let ((default-directory (file-name-as-directory worktree-path)))
+      (format "Created worktree %s (branch %s%s); %s"
+              worktree-path branch
+              (if branch-exists ", reusing existing branch" "")
+              (ai-code-cli-start)))))
 
 ;;;###autoload
 (defalias 'my/spawn-agent-worktree #'beads-worktree-orchestrator-spawn-agent-worktree

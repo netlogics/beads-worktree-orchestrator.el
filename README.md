@@ -25,7 +25,7 @@ You need all of these installed and working *before* this skill will do anything
 | Git | any reasonably recent version; worktrees are a standard feature |
 | Emacs with a running daemon | `emacsclient --eval '1'` should print `1` |
 | [ai-code-interface.el](https://github.com/tninja/ai-code-interface.el) | provides `ai-code-cli-start`, the backend-agnostic dispatcher the bundled spawn function calls; pick a backend with `ai-code-set-backend` (e.g. `'claude-code-ide`, which additionally requires [claude-code-ide.el](https://github.com/manzaltu/claude-code-ide.el)) |
-| Worktree-spawn function in your Emacs config | bundled in this repo as `my/spawn-agent-worktree` (`beads-worktree-orchestrator.el`) — load it in your config; it calls `ai-code-cli-start` scoped to the given worktree directory |
+| Worktree-spawn function in your Emacs config | bundled in this repo as `my/spawn-agent-worktree` (`beads-worktree-orchestrator.el`) — load it in your config; given a repo root and branch name, it creates the worktree under `ai-code-git-worktree-root` (the same location `ai-code-git-worktree-branch` uses for worktrees created by hand, intentionally — one worktree root, not two conventions) and calls `ai-code-cli-start` in it |
 | [MCP Agent Mail](https://github.com/Dicklesworthstone/mcp_agent_mail) | installed and configured in your agent's MCP settings; the one-line installer is `curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/mcp_agent_mail/main/scripts/install.sh \| bash -s -- --yes` |
 
 If any of these are missing, the skill will stop and tell you what's missing rather than guessing or silently degrading — except that if Agent Mail specifically isn't set up, you can explicitly ask it to fall back to Beads-only coordination for that run.
