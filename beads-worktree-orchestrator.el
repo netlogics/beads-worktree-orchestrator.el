@@ -252,6 +252,74 @@ on how they were created."
 (defalias 'my/spawn-agent-worktree #'beads-worktree-orchestrator-spawn-agent-worktree
   "Compatibility alias — the skill's SKILL.md hardcodes this exact name.")
 
+(defun beads-worktree-orchestrator--head-sha (repo-root branch)
+  "Return the commit sha BRANCH currently points to in REPO-ROOT."
+  (with-temp-buffer
+    (let ((exit (call-process "git" nil t nil "-C" repo-root "rev-parse" branch)))
+      (unless (zerop exit)
+        (user-error "git rev-parse %s failed: %s" branch (string-trim (buffer-string)))))
+    (string-trim (buffer-string))))
+
+;;;###autoload
+(defun beads-worktree-orchestrator-spawn-reviewer (repo-root branch)
+  "Create a detached-HEAD worktree reviewing BRANCH and start a session in it.
+
+Called by the beads-worktree-orchestrator skill when spawning a reviewer
+for an implementer's already-closed bead. A reviewer needs read access to
+the implementer's branch as it stood at review time, but git refuses to
+check out the same branch into two worktrees at once (\"already checked
+out\" — `git worktree add' errors if BRANCH is checked out anywhere else,
+including the implementer's own worktree that is likely still alive).
+There is no supported way to get a second, independent worktree onto the
+same branch ref.
+
+The workaround, discovered live while orchestrating a real review pass,
+is to resolve BRANCH's current commit and check that sha out **detached**
+in a new worktree instead of checking out the branch itself. A detached
+HEAD is just a checkout of a specific commit with no branch attached, so
+git's one-worktree-per-branch restriction never applies — any number of
+detached worktrees can point at the same commit simultaneously. The
+reviewer gets a real, independent working tree with exactly the
+implementer's reviewed code, and can run its own commands (tests,
+linters) in it without disturbing or being disturbed by the implementer's
+worktree.
+
+This intentionally does not take a START-POINT/create-branch path the way
+`beads-worktree-orchestrator-spawn-agent-worktree' does — a reviewer never
+commits, so there is no branch for it to advance; leaving it detached
+also makes `git worktree list' visually distinguish review worktrees
+(no branch column) from implementer ones.
+
+The worktree is created under `ai-code-git-worktree-root', using the same
+ROOT/REPO-NAME/<name> convention as
+`beads-worktree-orchestrator--worktree-path', but named
+\"review-BRANCH\" rather than BRANCH itself, so it cannot collide with the
+implementer's own worktree path and is identifiable at a glance in
+`git worktree list'.
+
+Returns a string describing what happened (worktree path, reviewed
+branch and sha, and the session-start result), mirroring
+`beads-worktree-orchestrator-spawn-agent-worktree'."
+  (unless (require 'ai-code-backends nil t)
+    (user-error "ai-code-interface.el is not available"))
+  (require 'ai-code-git)
+  (let* ((repo-root (file-name-as-directory (expand-file-name repo-root)))
+         (sha (beads-worktree-orchestrator--head-sha repo-root branch))
+         (review-name (concat "review-" branch))
+         (worktree-path (beads-worktree-orchestrator--worktree-path repo-root review-name)))
+    (when (file-directory-p worktree-path)
+      (user-error "Worktree already exists: %s" worktree-path))
+    (make-directory (file-name-directory (directory-file-name worktree-path)) t)
+    (with-temp-buffer
+      (let ((exit (call-process "git" nil t nil "-C" repo-root "worktree" "add"
+                                 "--detach" worktree-path sha)))
+        (unless (zerop exit)
+          (user-error "git worktree add --detach failed: %s" (string-trim (buffer-string))))))
+    (let ((default-directory (file-name-as-directory worktree-path)))
+      (format "Created detached-HEAD review worktree %s (reviewing %s at %s); %s"
+              worktree-path branch sha
+              (beads-worktree-orchestrator--start-worker-session)))))
+
 ;;; ---------------------------------------------------------------------
 ;;; Install / upgrade state
 ;;; ---------------------------------------------------------------------

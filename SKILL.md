@@ -68,7 +68,11 @@ Register the agent's identity in Agent Mail (name it `impl-bd-<id>` so mail and 
 Seed the worker's opening prompt with: the bead description (`bd show bd-<id> --json`), an instruction to run tests before closing, an instruction to close the bead itself (`bd close bd-<id> --reason "..."`), and — new — an instruction to **check its Agent Mail inbox periodically and check its thread before touching files** another agent might also be touching. If it needs to touch files outside its own worktree (shared config, generated schemas, etc.) it should call the file-reservation tool with a TTL before editing, and mail the bead's thread if it's blocked on something another agent owns.
 
 ### 4. Spawn reviewer/integrator (only if `count > 0`)
-- **Reviewer**: spawn only after an implementer closes a bead (`bd update ... --status closed` observed). Give it read-only access to the worktree/branch, not a new worktree of its own — it doesn't need file isolation since it isn't editing. Its output is a mail message to the implementer's thread (`[bd-<id>] review notes`), not a code change.
+- **Reviewer**: spawn only after an implementer closes a bead (`bd update ... --status closed` observed). git refuses to check out the implementer's branch into a second worktree while it's already checked out in the implementer's own worktree, so use `beads-worktree-orchestrator-spawn-reviewer` (in `beads-worktree-orchestrator.el`) instead of `my/spawn-agent-worktree`: it resolves the branch's current commit and checks that out **detached** in a new `review-<branch>` worktree, sidestepping the one-worktree-per-branch restriction while still giving the reviewer a real, independent working tree of the reviewed code:
+  ```bash
+  emacsclient --eval "(beads-worktree-orchestrator-spawn-reviewer \"$REPO_ROOT\" \"agent/impl-bd-<id>\")"
+  ```
+  Its output is a mail message to the implementer's thread (`[bd-<id>] review notes`), not a code change — the reviewer never commits from its detached worktree.
 - **Integrator**: spawn on its own cadence per `spawn_when` — check `git branch --merged` counts, or just re-check each time you're invoked. It merges into a scratch integration branch, runs tests, and mails the relevant implementer thread(s) if something breaks — it does not force-push over anyone's branch.
 
 ### 5. When to use mail vs. bd (guidance for the workers, and for you)
