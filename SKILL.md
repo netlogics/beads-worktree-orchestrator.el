@@ -18,12 +18,14 @@ You are acting as the **single orchestrator**: a coordinating agent that assigns
    - **Python FastMCP build**: there is no `am setup status`. Its installed CLI (`~/.local/bin/agent-mail` or similar) is not a general-purpose CLI at all — running it directly just prints a banner saying "MCP Agent Mail is NOT a CLI tool, use the MCP tools directly" and exits. **That banner is not a "not installed" signal — do not treat it as one.** Instead, check the actual HTTP server directly using the URL and bearer token from `~/.claude.json`'s `mcpServers.mcp-agent-mail` entry:
      ```bash
      URL=$(jq -r '.mcpServers."mcp-agent-mail".url' ~/.claude.json)
+     URL="${URL%/}/"   # normalize to exactly one trailing slash — don't assume the config already has one
      TOKEN=$(jq -r '.mcpServers."mcp-agent-mail".headers.Authorization' ~/.claude.json)
      curl -fsS -H "Authorization: $TOKEN" "${URL}health" && echo "agent mail: reachable"
      ```
-     If that fails, the server is down. Restart it **detached** so it can't be taken down as a side effect of killing something else (this is exactly what happened in a live run — the server had been started as a foreground child of another task, and killing that task killed the server too):
+     (`/health` hangs off the same base path as the rest of the API — e.g. `.../api/` → `.../api/health` — not off the bare origin, so don't strip the path down to `scheme://host:port` when building the URL.)
+     If that fails, the server is down. Restart it **in its own session/process group**, not just backgrounded, so it can't be taken down as a side effect of killing something else — this is exactly what happened in a live run: the server had been started as a foreground child of another task, and killing that task killed the server too because it shared that task's process group. `nohup ... &` alone doesn't fix this: `nohup` only blocks SIGHUP and `disown` only removes the job from the shell's table — neither moves the process to a new process group/session, so a `kill`/`pkill` aimed at the parent's group still takes it out. Use `setsid` to actually detach it:
      ```bash
-     cd ~/.local/share/mcp_agent_mail/ && nohup uv run python -m mcp_agent_mail.cli serve-http > /tmp/mcp-agent-mail-server.log 2>&1 & disown
+     cd ~/.local/share/mcp_agent_mail/ && setsid nohup uv run python -m mcp_agent_mail.cli serve-http > /tmp/mcp-agent-mail-server.log 2>&1 &
      ```
      (adjust the install dir if the user's differs). Re-run the curl check afterward to confirm it came up before proceeding.
 
