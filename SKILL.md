@@ -56,12 +56,11 @@ Count active worktrees by role prefix (see naming below). Respect each role's `c
 ### 3. Spawn implementer(s)
 For each selected bead `bd-<id>`:
 ```bash
-WORKTREE_DIR="$(git rev-parse --show-toplevel)/../wt-impl-bd-<id>"
-git worktree add "$WORKTREE_DIR" -b agent/impl-bd-<id>
-emacsclient --eval "(my/spawn-agent-worktree \"$WORKTREE_DIR\")"
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+emacsclient --eval "(my/spawn-agent-worktree \"$REPO_ROOT\" \"agent/impl-bd-<id>\")"
 bd update bd-<id> --status in_progress --assignee agent-impl-bd-<id>
 ```
-`my/spawn-agent-worktree` takes one argument, the worktree's absolute path — use an absolute path here since `emacsclient --eval` runs in the Emacs server's context, not the shell's cwd, so a relative path would resolve against the wrong directory.
+`my/spawn-agent-worktree` creates the worktree itself — it takes the repo's absolute path (use an absolute path since `emacsclient --eval` runs in the Emacs server's context, not the shell's cwd) and the branch name, and returns a string describing what it did, so this one line covers what used to be a separate `git worktree add` plus a session-start call. It does **not** create the worktree as a sibling of the repo — it uses `ai-code-git-worktree-root/<repo-name>/<branch>`, the same location `ai-code-git-worktree-branch` (the manual, interactive worktree command in `ai-code-menu`) uses. That's intentional: worktrees spawned by this skill and worktrees a human creates by hand end up in the same place, so there's one worktree root to look at and clean up, not two conventions to keep in sync. Run `git worktree list` (or check the returned path directly) rather than assuming `../wt-impl-bd-<id>` if you need to find it.
 Register the agent's identity in Agent Mail (name it `impl-bd-<id>` so mail and bd IDs line up) and seed its first message/thread with the bead's `thread_id` set to `bd-<id>`, per the shared-identifier convention (`[bd-<id>]` subject prefix). This is what lets you and other agents later pull "everything related to this bead" from either system.
 
 Seed the worker's opening prompt with: the bead description (`bd show bd-<id> --json`), an instruction to run tests before closing, an instruction to close the bead itself (`bd close bd-<id> --reason "..."`), and — new — an instruction to **check its Agent Mail inbox periodically and check its thread before touching files** another agent might also be touching. If it needs to touch files outside its own worktree (shared config, generated schemas, etc.) it should call the file-reservation tool with a TTL before editing, and mail the bead's thread if it's blocked on something another agent owns.
@@ -76,8 +75,9 @@ Tell every spawned worker this rule of thumb: **bd is for what's true and needs 
 ### 6. Check on workers (on request, or when re-invoked)
 ```bash
 bd list --status in_progress --json
-git -C ../wt-impl-bd-<id> status --short
-git -C ../wt-impl-bd-<id> log -1 --format=%cr
+git worktree list   # each worker's path is under ai-code-git-worktree-root/<repo-name>/agent/impl-bd-<id>
+git -C <worktree-path> status --short
+git -C <worktree-path> log -1 --format=%cr
 ```
 Also check each active agent's Agent Mail inbox for unread messages flagged urgent or unresolved for a long time — that's often a sign two agents are blocked on each other and need you to intervene, which mail alone won't force to your attention since it's asynchronous.
 
@@ -86,7 +86,7 @@ If a worker shows no bd activity, no commits, and no mail activity for an unusua
 ### 7. Clean up completed work
 When `bd show bd-<id>` shows `status: closed` and (if a reviewer is enabled) review is resolved:
 1. Confirm the branch is merged, or hand off to the integrator role if enabled.
-2. `git worktree remove ../wt-impl-bd-<id>`
+2. `git worktree remove <worktree-path>` (find it via `git worktree list` if not already known)
 3. `git branch -d agent/impl-bd-<id>`
 4. Loop back to step 1 for the freed implementer slot.
 
