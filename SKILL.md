@@ -13,11 +13,27 @@ You are acting as the **single orchestrator**: a coordinating agent that assigns
 2. The repo is a git repo with a clean-enough working tree.
 3. An Emacs daemon is reachable: `emacsclient --eval '1'` returns `1`.
 4. `emacsclient --eval "(fboundp 'my/spawn-agent-worktree)"` returns `t`. If not, stop and ask what the user's spawn function is called — don't guess and eval something destructive.
-5. MCP Agent Mail is reachable (`am setup status` or the Python CLI's health check, depending on which build the user installed — Go/`am`, Rust, or the original Python FastMCP server). If it's not installed, tell the user to run the one-line installer:
+5. MCP Agent Mail is actually reachable — not just installed. The check differs by build (Go/`am`, Rust, or the original Python FastMCP server), and "installed" is not the same as "server running": a real preflight has to confirm the HTTP server behind the MCP tools is up, since it's an independent process that can be killed out from under you (e.g. as a side effect of stopping some unrelated stuck task) without either your session or a worker's session noticing until an MCP tool call fails.
+   - **Go (`am`) / Rust builds**: `am setup status` (or that build's equivalent health subcommand) is a real CLI check — use it.
+   - **Python FastMCP build**: there is no `am setup status`. Its installed CLI (`~/.local/bin/agent-mail` or similar) is not a general-purpose CLI at all — running it directly just prints a banner saying "MCP Agent Mail is NOT a CLI tool, use the MCP tools directly" and exits. **That banner is not a "not installed" signal — do not treat it as one.** Instead, check the actual HTTP server directly using the URL and bearer token from `~/.claude.json`'s `mcpServers.mcp-agent-mail` entry:
+     ```bash
+     URL=$(jq -r '.mcpServers."mcp-agent-mail".url' ~/.claude.json)
+     TOKEN=$(jq -r '.mcpServers."mcp-agent-mail".headers.Authorization' ~/.claude.json)
+     curl -fsS -H "Authorization: $TOKEN" "${URL}health" && echo "agent mail: reachable"
+     ```
+     If that fails, the server is down. Restart it **detached** so it can't be taken down as a side effect of killing something else (this is exactly what happened in a live run — the server had been started as a foreground child of another task, and killing that task killed the server too):
+     ```bash
+     cd ~/.local/share/mcp_agent_mail/ && nohup uv run python -m mcp_agent_mail.cli serve-http > /tmp/mcp-agent-mail-server.log 2>&1 & disown
+     ```
+     (adjust the install dir if the user's differs). Re-run the curl check afterward to confirm it came up before proceeding.
+
+   If Agent Mail isn't installed at all, tell the user to run the one-line installer:
    ```bash
    curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/mcp_agent_mail/main/scripts/install.sh | bash -s -- --yes
    ```
    and confirm the server is configured in their agent's MCP settings before proceeding. Mail is required for the roles below to coordinate with each other; if the user wants to skip it for this run, fall back to bd-only coordination as described in the earlier version of this workflow.
+
+   **Your own session's MCP tools may lag reality.** MCP tools load at session start, not dynamically — if your orchestrator session started before Agent Mail was installed/configured, you will have no `mcp__mcp-agent-mail__*` tools even after the server above is confirmed healthy, and no amount of restarting the server fixes that (you'd need a fresh session). In that case don't block the whole workflow on mail: spawned workers get fresh sessions with the current tool list, so let them coordinate with each other via mail as normal, and supervise from your side via `bd`/`git` only, per the "mail vs. bd" guidance below.
 
 ## Configuration: agent count & roles
 
