@@ -13,11 +13,29 @@ You are acting as the **single orchestrator**: a coordinating agent that assigns
 2. The repo is a git repo with a clean-enough working tree.
 3. An Emacs daemon is reachable: `emacsclient --eval '1'` returns `1`.
 4. `emacsclient --eval "(fboundp 'my/spawn-agent-worktree)"` returns `t`. If not, stop and ask what the user's spawn function is called — don't guess and eval something destructive.
-5. MCP Agent Mail is reachable (`am setup status` or the Python CLI's health check, depending on which build the user installed — Go/`am`, Rust, or the original Python FastMCP server). If it's not installed, tell the user to run the one-line installer:
+5. MCP Agent Mail is actually reachable — not just installed. The check differs by build (Go/`am`, Rust, or the original Python FastMCP server), and "installed" is not the same as "server running": a real preflight has to confirm the HTTP server behind the MCP tools is up, since it's an independent process that can be killed out from under you (e.g. as a side effect of stopping some unrelated stuck task) without either your session or a worker's session noticing until an MCP tool call fails.
+   - **Go (`am`) / Rust builds**: `am setup status` (or that build's equivalent health subcommand) is a real CLI check — use it.
+   - **Python FastMCP build**: there is no `am setup status`. Its installed CLI (`~/.local/bin/agent-mail` or similar) is not a general-purpose CLI at all — running it directly just prints a banner saying "MCP Agent Mail is NOT a CLI tool, use the MCP tools directly" and exits. **That banner is not a "not installed" signal — do not treat it as one.** Instead, check the actual HTTP server directly using the URL and bearer token from `~/.claude.json`'s `mcpServers.mcp-agent-mail` entry:
+     ```bash
+     URL=$(jq -r '.mcpServers."mcp-agent-mail".url' ~/.claude.json)
+     URL="${URL%/}/"   # normalize to exactly one trailing slash — don't assume the config already has one
+     TOKEN=$(jq -r '.mcpServers."mcp-agent-mail".headers.Authorization' ~/.claude.json)
+     curl -fsS -H "Authorization: $TOKEN" "${URL}health" && echo "agent mail: reachable"
+     ```
+     (`/health` hangs off the same base path as the rest of the API — e.g. `.../api/` → `.../api/health` — not off the bare origin, so don't strip the path down to `scheme://host:port` when building the URL.)
+     If that fails, the server is down. Restart it **in its own session/process group**, not just backgrounded, so it can't be taken down as a side effect of killing something else — this is exactly what happened in a live run: the server had been started as a foreground child of another task, and killing that task killed the server too because it shared that task's process group. `nohup ... &` alone doesn't fix this: `nohup` only blocks SIGHUP and `disown` only removes the job from the shell's table — neither moves the process to a new process group/session, so a `kill`/`pkill` aimed at the parent's group still takes it out. Use `setsid` to actually detach it:
+     ```bash
+     cd ~/.local/share/mcp_agent_mail/ && setsid nohup uv run python -m mcp_agent_mail.cli serve-http > /tmp/mcp-agent-mail-server.log 2>&1 &
+     ```
+     (adjust the install dir if the user's differs). Re-run the curl check afterward to confirm it came up before proceeding.
+
+   If Agent Mail isn't installed at all, tell the user to run the one-line installer:
    ```bash
    curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/mcp_agent_mail/main/scripts/install.sh | bash -s -- --yes
    ```
    and confirm the server is configured in their agent's MCP settings before proceeding. Mail is required for the roles below to coordinate with each other; if the user wants to skip it for this run, fall back to bd-only coordination as described in the earlier version of this workflow.
+
+   **Your own session's MCP tools may lag reality.** MCP tools load at session start, not dynamically — if your orchestrator session started before Agent Mail was installed/configured, you will have no `mcp__mcp-agent-mail__*` tools even after the server above is confirmed healthy, and no amount of restarting the server fixes that (you'd need a fresh session). In that case don't block the whole workflow on mail: spawned workers get fresh sessions with the current tool list, so let them coordinate with each other via mail as normal, and supervise from your side via `bd`/`git` only, per the "mail vs. bd" guidance below.
 
 ## Configuration: agent count & roles
 
@@ -54,19 +72,35 @@ git worktree list
 Count active worktrees by role prefix (see naming below). Respect each role's `count` and the overall `max_parallel_agents` cap. Never exceed either.
 
 ### 3. Spawn implementer(s)
-For each selected bead `bd-<id>`:
+For each selected bead `bd-<id>`, build the opening prompt string (see below), then:
 ```bash
 REPO_ROOT="$(git rev-parse --show-toplevel)"
-emacsclient --eval "(my/spawn-agent-worktree \"$REPO_ROOT\" \"agent/impl-bd-<id>\")"
+PROMPT="<opening prompt text — see below>"
+emacsclient --eval "(beads-worktree-orchestrator-spawn-and-send-prompt \"$REPO_ROOT\" \"agent/impl-bd-<id>\" \"$PROMPT\")"
 bd update bd-<id> --status in_progress --assignee agent-impl-bd-<id>
 ```
-`my/spawn-agent-worktree` creates the worktree itself — it takes the repo's absolute path (use an absolute path since `emacsclient --eval` runs in the Emacs server's context, not the shell's cwd) and the branch name, and returns a string describing what it did, so this one line covers what used to be a separate `git worktree add` plus a session-start call. It does **not** create the worktree as a sibling of the repo — it uses `ai-code-git-worktree-root/<repo-name>/<branch>`, the same location `ai-code-git-worktree-branch` (the manual, interactive worktree command in `ai-code-menu`) uses. That's intentional: worktrees spawned by this skill and worktrees a human creates by hand end up in the same place, so there's one worktree root to look at and clean up, not two conventions to keep in sync. Run `git worktree list` (or check the returned path directly) rather than assuming `../wt-impl-bd-<id>` if you need to find it.
+
+`beads-worktree-orchestrator-spawn-and-send-prompt` creates the worktree, starts the session, **waits for the MCP WebSocket to connect** (the reliable "Claude is ready to accept input" signal), then sends the prompt in one call. Use this instead of calling `my/spawn-agent-worktree` and then separately sending a prompt: the separate approach has a race condition where the text is entered but `Enter` is sent before Claude's input loop is running, so the prompt sits there unsubmitted.
+
+`my/spawn-agent-worktree` remains available as a compatibility alias for cases where you want to spawn without an opening prompt (e.g. when you'll let the worker pick its own task via `bd ready`), but for the normal "assign a specific bead" workflow, use the `spawn-and-send-prompt` variant.
+
+All paths use the repo's absolute path (use an absolute path since `emacsclient --eval` runs in the Emacs server's context, not the shell's cwd). The worktree is created under `ai-code-git-worktree-root/<repo-name>/<branch>`, same location as manual `ai-code-git-worktree-branch` worktrees. Run `git worktree list` (or check the returned path) to find it.
+
+If the return value contains "WARNING: MCP did not connect", the worker started but timed out before becoming ready — find its session buffer and send the prompt manually, or kill and respawn it.
+
+**Permission prompts.** By default the spawned worker will stall on its first interactive permission prompt (Bash command, file edit) since nobody's watching its session — you'll need to send a keystroke into its vterm buffer to unblock it, every time, for every worker. If the user has opted in to unattended workers (`BEADS_WORKTREE_ORCHESTRATOR_UNSAFE_WORKER_PERMISSIONS` set before the Emacs daemon started — see the package's README), this doesn't happen. If you notice a worker has had no bd/git/mail activity for a while, check its session buffer for a stuck prompt before assuming it's actually idle or stalled on the task itself.
+
 Register the agent's identity in Agent Mail (name it `impl-bd-<id>` so mail and bd IDs line up) and seed its first message/thread with the bead's `thread_id` set to `bd-<id>`, per the shared-identifier convention (`[bd-<id>]` subject prefix). This is what lets you and other agents later pull "everything related to this bead" from either system.
 
-Seed the worker's opening prompt with: the bead description (`bd show bd-<id> --json`), an instruction to run tests before closing, an instruction to close the bead itself (`bd close bd-<id> --reason "..."`), and — new — an instruction to **check its Agent Mail inbox periodically and check its thread before touching files** another agent might also be touching. If it needs to touch files outside its own worktree (shared config, generated schemas, etc.) it should call the file-reservation tool with a TTL before editing, and mail the bead's thread if it's blocked on something another agent owns.
+**Opening prompt contents**: the bead description (`bd show bd-<id> --json`), an instruction to run tests before closing, an instruction to close the bead itself (`bd close bd-<id> --reason "..."`), and an instruction to **check its Agent Mail inbox periodically and check its thread before touching files** another agent might also be touching. If it needs to touch files outside its own worktree (shared config, generated schemas, etc.) it should call the file-reservation tool with a TTL before editing, and mail the bead's thread if it's blocked on something another agent owns.
 
 ### 4. Spawn reviewer/integrator (only if `count > 0`)
-- **Reviewer**: spawn only after an implementer closes a bead (`bd update ... --status closed` observed). Give it read-only access to the worktree/branch, not a new worktree of its own — it doesn't need file isolation since it isn't editing. Its output is a mail message to the implementer's thread (`[bd-<id>] review notes`), not a code change.
+- **Reviewer**: spawn only after an implementer closes a bead (`bd update ... --status closed` observed). git refuses to check out the implementer's branch into a second worktree while it's already checked out in the implementer's own worktree, so use `beads-worktree-orchestrator-spawn-reviewer-and-send-prompt` (in `beads-worktree-orchestrator.el`) instead of `my/spawn-agent-worktree`: it resolves the branch's current commit and checks that out **detached** in a new `review-<branch>` worktree, sidestepping the one-worktree-per-branch restriction while still giving the reviewer a real, independent working tree of the reviewed code:
+  ```bash
+  PROMPT="<reviewer opening prompt — see below>"
+  emacsclient --eval "(beads-worktree-orchestrator-spawn-reviewer-and-send-prompt \"$REPO_ROOT\" \"agent/impl-bd-<id>\" \"$PROMPT\")"
+  ```
+  Like the implementer variant, this waits for MCP to connect before sending the prompt, so the reviewer's first message is reliably submitted. Its output is a mail message to the implementer's thread (`[bd-<id>] review notes`), not a code change — the reviewer never commits from its detached worktree.
 - **Integrator**: spawn on its own cadence per `spawn_when` — check `git branch --merged` counts, or just re-check each time you're invoked. It merges into a scratch integration branch, runs tests, and mails the relevant implementer thread(s) if something breaks — it does not force-push over anyone's branch.
 
 ### 5. When to use mail vs. bd (guidance for the workers, and for you)

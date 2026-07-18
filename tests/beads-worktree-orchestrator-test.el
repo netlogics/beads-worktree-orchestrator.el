@@ -244,6 +244,423 @@ entirely inside disposable temp directories."
         ;; Git-tracked path relies on history, not a .bak backup.
         (should-not (file-exists-p backup))))))
 
+;;; ---------------------------------------------------------------------
+;;; --start-worker-session: claude-code-ide bypass
+;;; ---------------------------------------------------------------------
+
+;; The real `ai-code' / `claude-code-ide' packages aren't loadable in this
+;; batch test context, so stub just enough of their API surface for
+;; `beads-worktree-orchestrator--start-worker-session' to call into.
+;; Tests below override these with `cl-letf' to record what got called.
+
+(defvar ai-code-selected-backend 'claude-code
+  "Stub for tests; the real definition lives in ai-code-backends.el.")
+
+(defun ai-code--effective-backend ()
+  "Stub for tests; overridden per-test via `cl-letf'."
+  ai-code-selected-backend)
+
+(defun ai-code--activate-effective-backend ()
+  "Stub for tests; overridden per-test via `cl-letf'.")
+
+(defun ai-code--remember-current-backend-for-repo ()
+  "Stub for tests; overridden per-test via `cl-letf'.")
+
+(defun ai-code-cli-start ()
+  "Stub for tests; overridden per-test via `cl-letf'.
+Real implementation lives in ai-code-backends.el and itself dispatches to
+`claude-code-ide--start-if-no-session' for the claude-code-ide backend —
+the buggy wrapper `beads-worktree-orchestrator--start-worker-session' is
+meant to bypass, which is exactly why tests assert this stub is NOT
+called when the effective backend is `claude-code-ide'.")
+
+(defun claude-code-ide ()
+  "Stub for tests; overridden per-test via `cl-letf'.")
+
+(defvar claude-code-ide-cli-extra-flags nil
+  "Stub for tests; the real definition lives in claude-code-ide.el.
+Must be declared `defvar' (special) here, not just `let'-bound, since
+`beads-worktree-orchestrator--start-worker-session' dynamically rebinds
+it and tests need that rebinding to actually take effect.")
+
+(defmacro bwo-test--with-call-log (log-var &rest body)
+  "Bind LOG-VAR to a list of call markers pushed onto during BODY."
+  (declare (indent 1))
+  `(let ((,log-var nil))
+     ,@body))
+
+(ert-deftest bwo-test-start-worker-session-uses-claude-code-ide-directly ()
+  "When the effective backend is `claude-code-ide', call it directly,
+bypassing `ai-code-cli-start' (and hence the buggy has-active-session-p
+check inside `claude-code-ide--start-if-no-session')."
+  (bwo-test--with-call-log calls
+    (cl-letf (((symbol-function 'ai-code--effective-backend)
+               (lambda () 'claude-code-ide))
+              ((symbol-function 'ai-code--activate-effective-backend)
+               (lambda () (push 'activate calls)))
+              ((symbol-function 'ai-code--remember-current-backend-for-repo)
+               (lambda () (push 'remember calls)))
+              ((symbol-function 'claude-code-ide)
+               (lambda () (push 'claude-code-ide-direct calls)))
+              ((symbol-function 'ai-code-cli-start)
+               (lambda () (push 'ai-code-cli-start calls)))
+              (beads-worktree-orchestrator-worker-permission-mode nil))
+      (beads-worktree-orchestrator--start-worker-session)
+      (should (memq 'claude-code-ide-direct calls))
+      (should-not (memq 'ai-code-cli-start calls))
+      (should (memq 'activate calls))
+      (should (memq 'remember calls)))))
+
+(ert-deftest bwo-test-start-worker-session-uses-ai-code-cli-start-for-other-backends ()
+  "For any backend other than `claude-code-ide', keep using the generic
+`ai-code-cli-start' path — don't special-case other backends."
+  (bwo-test--with-call-log calls
+    (cl-letf (((symbol-function 'ai-code--effective-backend)
+               (lambda () 'claude-code))
+              ((symbol-function 'ai-code--activate-effective-backend)
+               (lambda () (push 'activate calls)))
+              ((symbol-function 'ai-code--remember-current-backend-for-repo)
+               (lambda () (push 'remember calls)))
+              ((symbol-function 'claude-code-ide)
+               (lambda () (push 'claude-code-ide-direct calls)))
+              ((symbol-function 'ai-code-cli-start)
+               (lambda () (push 'ai-code-cli-start calls)))
+              (beads-worktree-orchestrator-worker-permission-mode nil))
+      (beads-worktree-orchestrator--start-worker-session)
+      (should (memq 'ai-code-cli-start calls))
+      (should-not (memq 'claude-code-ide-direct calls)))))
+
+(ert-deftest bwo-test-start-worker-session-pre-approves-permissions-on-direct-path ()
+  "The `--permission-mode' pre-approval flag still applies when the direct
+`claude-code-ide' path is taken, not just the `ai-code-cli-start' path."
+  (bwo-test--with-call-log calls
+    (let ((claude-code-ide-cli-extra-flags ""))
+      (cl-letf (((symbol-function 'ai-code--effective-backend)
+                 (lambda () 'claude-code-ide))
+                ((symbol-function 'ai-code--activate-effective-backend)
+                 (lambda ()))
+                ((symbol-function 'ai-code--remember-current-backend-for-repo)
+                 (lambda ()))
+                ((symbol-function 'claude-code-ide)
+                 (lambda () (push claude-code-ide-cli-extra-flags calls)))
+                ((symbol-function 'ai-code-cli-start)
+                 (lambda () (push 'ai-code-cli-start calls)))
+                (beads-worktree-orchestrator-worker-permission-mode "bypassPermissions"))
+        (beads-worktree-orchestrator--start-worker-session)
+        (should (member "--permission-mode bypassPermissions" calls))))))
+
+;;; ---------------------------------------------------------------------
+;;; --head-sha
+;;; ---------------------------------------------------------------------
+
+(ert-deftest bwo-test-head-sha ()
+  (bwo-test--with-temp-dir dir
+    (bwo-test--git dir "init" "-q" "-b" "main" ".")
+    (bwo-test--git dir "config" "user.email" "test@example.com")
+    (bwo-test--git dir "config" "user.name" "Test")
+    (bwo-test--write-file (expand-file-name "f.txt" dir) "hi\n")
+    (bwo-test--git dir "add" "f.txt")
+    (bwo-test--git dir "commit" "-q" "-m" "init")
+    (let ((expected (with-temp-buffer
+                      (let ((default-directory dir))
+                        (call-process "git" nil t nil "rev-parse" "main"))
+                      (string-trim (buffer-string)))))
+      (should (equal (beads-worktree-orchestrator--head-sha dir "main") expected)))))
+
+(ert-deftest bwo-test-head-sha-unknown-branch-errors ()
+  (bwo-test--with-temp-dir dir
+    (bwo-test--git dir "init" "-q" "-b" "main" ".")
+    (should-error (beads-worktree-orchestrator--head-sha dir "does-not-exist"))))
+
+;;; ---------------------------------------------------------------------
+;;; spawn-reviewer
+;;; ---------------------------------------------------------------------
+
+(ert-deftest bwo-test-spawn-reviewer-creates-detached-worktree ()
+  (bwo-test--with-temp-dir root
+    (bwo-test--with-temp-dir repo-parent
+      (let* ((ai-code-git-worktree-root root)
+             (repo-root (expand-file-name "my-repo/" repo-parent)))
+        (make-directory repo-root t)
+        (bwo-test--git repo-root "init" "-q" "-b" "main" ".")
+        (bwo-test--git repo-root "config" "user.email" "test@example.com")
+        (bwo-test--git repo-root "config" "user.name" "Test")
+        (bwo-test--write-file (expand-file-name "f.txt" repo-root) "hi\n")
+        (bwo-test--git repo-root "add" "f.txt")
+        (bwo-test--git repo-root "commit" "-q" "-m" "init")
+        (bwo-test--git repo-root "checkout" "-q" "-b" "impl-branch")
+        (bwo-test--write-file (expand-file-name "f.txt" repo-root) "changed\n")
+        (bwo-test--git repo-root "add" "f.txt")
+        (bwo-test--git repo-root "commit" "-q" "-m" "impl work")
+        (bwo-test--git repo-root "checkout" "-q" "main")
+        (let ((expected-path (expand-file-name "review-impl-branch"
+                                                (expand-file-name "my-repo" root))))
+          (cl-letf (((symbol-function 'beads-worktree-orchestrator--start-worker-session)
+                     (lambda () "session-started"))
+                    ((symbol-function 'require)
+                     (lambda (feature &rest _) feature)))
+            (let ((result (beads-worktree-orchestrator-spawn-reviewer repo-root "impl-branch")))
+              (should (file-directory-p expected-path))
+              (should (string-match-p (regexp-quote expected-path) result))
+              (should (string-match-p "impl-branch" result))
+              (should (string-match-p "session-started" result))
+              ;; Detached HEAD: no branch checked out in the review worktree.
+              (should (equal (with-temp-buffer
+                                (let ((default-directory expected-path))
+                                  (call-process "git" nil t nil "symbolic-ref" "-q" "HEAD"))
+                                (buffer-string))
+                             ""))
+              ;; Content matches the reviewed branch, not main.
+              (should (equal (with-temp-buffer
+                                (insert-file-contents (expand-file-name "f.txt" expected-path))
+                                (buffer-string))
+                             "changed\n")))))))))
+
+(ert-deftest bwo-test-spawn-reviewer-sanitizes-slash-in-branch ()
+  ;; my/spawn-agent-worktree always creates branches like
+  ;; "agent/impl-bd-<id>" -- this is the realistic case, not an edge case.
+  ;; "review-" + that branch must not be treated as a nested path by
+  ;; expand-file-name.
+  (bwo-test--with-temp-dir root
+    (bwo-test--with-temp-dir repo-parent
+      (let* ((ai-code-git-worktree-root root)
+             (repo-root (expand-file-name "my-repo/" repo-parent))
+             (branch "agent/impl-bd-42"))
+        (make-directory repo-root t)
+        (bwo-test--git repo-root "init" "-q" "-b" "main" ".")
+        (bwo-test--git repo-root "config" "user.email" "test@example.com")
+        (bwo-test--git repo-root "config" "user.name" "Test")
+        (bwo-test--write-file (expand-file-name "f.txt" repo-root) "hi\n")
+        (bwo-test--git repo-root "add" "f.txt")
+        (bwo-test--git repo-root "commit" "-q" "-m" "init")
+        (bwo-test--git repo-root "checkout" "-q" "-b" branch)
+        (bwo-test--write-file (expand-file-name "f.txt" repo-root) "changed\n")
+        (bwo-test--git repo-root "add" "f.txt")
+        (bwo-test--git repo-root "commit" "-q" "-m" "impl work")
+        (bwo-test--git repo-root "checkout" "-q" "main")
+        (let* ((repo-worktree-root (expand-file-name "my-repo" root))
+               (expected-path (expand-file-name "review-agent-impl-bd-42" repo-worktree-root))
+               (nested-path (expand-file-name "review-agent/impl-bd-42" repo-worktree-root)))
+          (cl-letf (((symbol-function 'beads-worktree-orchestrator--start-worker-session)
+                     (lambda () "session-started"))
+                    ((symbol-function 'require)
+                     (lambda (feature &rest _) feature)))
+            (let ((result (beads-worktree-orchestrator-spawn-reviewer repo-root branch)))
+              (should (file-directory-p expected-path))
+              (should-not (file-directory-p nested-path))
+              (should (string-match-p (regexp-quote expected-path) result))
+              ;; Flat directory: its parent is the repo's worktree root,
+              ;; not an intermediate "review-agent" directory.
+              (should (equal (file-name-directory (directory-file-name expected-path))
+                             (file-name-as-directory repo-worktree-root))))))))))
+
+(ert-deftest bwo-test-spawn-reviewer-errors-if-worktree-exists ()
+  (bwo-test--with-temp-dir root
+    (bwo-test--with-temp-dir repo-parent
+      (let* ((ai-code-git-worktree-root root)
+             (repo-root (expand-file-name "my-repo/" repo-parent)))
+        (make-directory repo-root t)
+        (bwo-test--git repo-root "init" "-q" "-b" "main" ".")
+        (bwo-test--git repo-root "config" "user.email" "test@example.com")
+        (bwo-test--git repo-root "config" "user.name" "Test")
+        (bwo-test--write-file (expand-file-name "f.txt" repo-root) "hi\n")
+        (bwo-test--git repo-root "add" "f.txt")
+        (bwo-test--git repo-root "commit" "-q" "-m" "init")
+        (let ((existing (expand-file-name "review-main" (expand-file-name "my-repo" root))))
+          (make-directory existing t)
+          (cl-letf (((symbol-function 'beads-worktree-orchestrator--start-worker-session)
+                     (lambda () "session-started"))
+                    ((symbol-function 'require)
+                     (lambda (feature &rest _) feature)))
+            (should-error (beads-worktree-orchestrator-spawn-reviewer repo-root "main"))))))))
+
+;;; ---------------------------------------------------------------------
+;;; --wait-for-mcp-ready / spawn-and-send-prompt
+;;; ---------------------------------------------------------------------
+
+;; Stubs for MCP, send-prompt, and vterm APIs, which aren't loadable in batch context.
+
+(defvar vterm-copy-mode nil
+  "Stub variable; the real one is created by `define-minor-mode' in vterm.el.")
+
+(defun vterm-copy-mode (&optional _arg)
+  "Stub; overridden per-test via `cl-letf'.")
+
+(defun claude-code-ide--get-buffer-name (&optional _directory)
+  "Stub; overridden per-test via `cl-letf'.")
+
+(defun claude-code-ide--display-buffer-in-side-window (_buffer)
+  "Stub; overridden per-test via `cl-letf'.")
+
+(defun claude-code-ide-mcp--get-session-for-project (_project-dir)
+  "Stub; overridden per-test via `cl-letf'.")
+
+(cl-defstruct bwo-test--fake-session client)
+
+(defun claude-code-ide-mcp-session-client (_session)
+  "Stub; overridden per-test via `cl-letf'.")
+
+(defun claude-code-ide-send-prompt (&optional _prompt)
+  "Stub; overridden per-test via `cl-letf'.")
+
+(ert-deftest bwo-test-wait-for-mcp-ready-times-out ()
+  "Returns nil when no MCP session appears within the timeout."
+  (cl-letf (((symbol-function 'claude-code-ide-mcp--get-session-for-project)
+             (lambda (_dir) nil)))
+    (let ((beads-worktree-orchestrator-session-ready-timeout 0.6))
+      (should-not (beads-worktree-orchestrator--wait-for-mcp-ready "/some/path/")))))
+
+(ert-deftest bwo-test-wait-for-mcp-ready-returns-t-when-already-ready ()
+  "Returns t immediately when MCP session already has a live client."
+  (let* ((fake-session (make-bwo-test--fake-session :client 'mock-ws)))
+    (cl-letf (((symbol-function 'claude-code-ide-mcp--get-session-for-project)
+               (lambda (_dir) fake-session))
+              ((symbol-function 'claude-code-ide-mcp-session-client)
+               (lambda (s) (bwo-test--fake-session-client s))))
+      (let ((beads-worktree-orchestrator-session-ready-timeout 5))
+        (should (beads-worktree-orchestrator--wait-for-mcp-ready "/some/path/"))))))
+
+(ert-deftest bwo-test-spawn-and-send-prompt-sends-prompt-when-ready ()
+  "Sends the prompt via `claude-code-ide-send-prompt' when MCP becomes ready."
+  (bwo-test--with-temp-dir root
+    (bwo-test--with-temp-dir repo-parent
+      (let* ((ai-code-git-worktree-root root)
+             (repo-root (expand-file-name "my-repo/" repo-parent))
+             (sent-prompts nil)
+             (fake-session (make-bwo-test--fake-session :client 'mock-ws)))
+        (make-directory repo-root t)
+        (bwo-test--git repo-root "init" "-q" "-b" "main" ".")
+        (bwo-test--git repo-root "config" "user.email" "test@example.com")
+        (bwo-test--git repo-root "config" "user.name" "Test")
+        (bwo-test--write-file (expand-file-name "f.txt" repo-root) "hi\n")
+        (bwo-test--git repo-root "add" "f.txt")
+        (bwo-test--git repo-root "commit" "-q" "-m" "init")
+        (cl-letf (((symbol-function 'beads-worktree-orchestrator--start-worker-session)
+                   (lambda () "session-started"))
+                  ((symbol-function 'require)
+                   (lambda (feature &rest _) feature))
+                  ((symbol-function 'claude-code-ide-mcp--get-session-for-project)
+                   (lambda (_dir) fake-session))
+                  ((symbol-function 'claude-code-ide-mcp-session-client)
+                   (lambda (s) (bwo-test--fake-session-client s)))
+                  ((symbol-function 'claude-code-ide-send-prompt)
+                   (lambda (p) (push p sent-prompts))))
+          (let ((beads-worktree-orchestrator-post-ready-delay 0))
+            (let ((result (beads-worktree-orchestrator-spawn-and-send-prompt
+                           repo-root "feature-x" "do the thing")))
+              (should (equal sent-prompts '("do the thing")))
+              (should (string-match-p "sent opening prompt" result)))))))))
+
+(ert-deftest bwo-test-setup-worker-scrollback-installs-keybindings ()
+  "PageUp/PageDown get buffer-local bindings in a vterm-mode worker buffer."
+  (bwo-test--with-temp-dir dir
+    (let* ((dir (file-name-as-directory dir))
+           (buf (get-buffer-create "*bwo-test-vterm-fake*")))
+      (unwind-protect
+          (with-current-buffer buf
+            (let ((vterm-copy-mode nil))
+              (cl-letf (((symbol-function 'derived-mode-p)
+                         (lambda (mode &rest _) (eq mode 'vterm-mode)))
+                        ((symbol-function 'claude-code-ide--get-buffer-name)
+                         (lambda (_d) "*bwo-test-vterm-fake*")))
+                (beads-worktree-orchestrator--setup-worker-scrollback dir)
+                (should (local-key-binding (kbd "<prior>")))
+                (should (local-key-binding (kbd "<next>")))
+                ;; Bindings point at the named helpers, not anonymous lambdas.
+                (should (eq (local-key-binding (kbd "<prior>"))
+                            #'beads-worktree-orchestrator--enter-scroll-mode))
+                (should (eq (local-key-binding (kbd "<next>"))
+                            #'beads-worktree-orchestrator--exit-scroll-mode)))))
+        (kill-buffer buf)))))
+
+(ert-deftest bwo-test-enter-scroll-mode-calls-evil-normal-state ()
+  "enter-scroll-mode calls evil-normal-state when evil is available."
+  (let ((vterm-copy-mode nil)
+        (evil-called nil))
+    (cl-letf (((symbol-function 'vterm-copy-mode) (lambda (_) nil))
+              ((symbol-function 'scroll-down-command) (lambda () nil))
+              ((symbol-function 'evil-normal-state) (lambda () (setq evil-called t))))
+      (beads-worktree-orchestrator--enter-scroll-mode)
+      (should evil-called))))
+
+(ert-deftest bwo-test-exit-scroll-mode-calls-evil-insert-state-at-bottom ()
+  "exit-scroll-mode switches back to evil insert state when leaving copy-mode."
+  (let ((vterm-copy-mode t)
+        (insert-called nil))
+    (cl-letf (((symbol-function 'scroll-up-command) (lambda () (signal 'end-of-buffer nil)))
+              ((symbol-function 'vterm-copy-mode) (lambda (_) nil))
+              ((symbol-function 'evil-insert-state) (lambda () (setq insert-called t))))
+      (beads-worktree-orchestrator--exit-scroll-mode)
+      (should insert-called))))
+
+(ert-deftest bwo-test-setup-worker-scrollback-no-ops-when-buffer-missing ()
+  "Silently does nothing when the session buffer doesn't exist."
+  (cl-letf (((symbol-function 'claude-code-ide--get-buffer-name)
+             (lambda (_d) "*bwo-test-nonexistent-buffer*")))
+    ;; Should not signal an error.
+    (should (eq nil (beads-worktree-orchestrator--setup-worker-scrollback "/some/path/")))))
+
+(ert-deftest bwo-test-spawn-and-send-prompt-calls-setup-scrollback ()
+  "spawn-and-send-prompt calls --setup-worker-scrollback when MCP is ready."
+  (bwo-test--with-temp-dir root
+    (bwo-test--with-temp-dir repo-parent
+      (let* ((ai-code-git-worktree-root root)
+             (repo-root (expand-file-name "my-repo/" repo-parent))
+             (scrollback-calls nil)
+             (fake-session (make-bwo-test--fake-session :client 'mock-ws)))
+        (make-directory repo-root t)
+        (bwo-test--git repo-root "init" "-q" "-b" "main" ".")
+        (bwo-test--git repo-root "config" "user.email" "test@example.com")
+        (bwo-test--git repo-root "config" "user.name" "Test")
+        (bwo-test--write-file (expand-file-name "f.txt" repo-root) "hi\n")
+        (bwo-test--git repo-root "add" "f.txt")
+        (bwo-test--git repo-root "commit" "-q" "-m" "init")
+        (cl-letf (((symbol-function 'beads-worktree-orchestrator--start-worker-session)
+                   (lambda () "session-started"))
+                  ((symbol-function 'require)
+                   (lambda (feature &rest _) feature))
+                  ((symbol-function 'claude-code-ide-mcp--get-session-for-project)
+                   (lambda (_dir) fake-session))
+                  ((symbol-function 'claude-code-ide-mcp-session-client)
+                   (lambda (s) (bwo-test--fake-session-client s)))
+                  ((symbol-function 'claude-code-ide-send-prompt)
+                   (lambda (_p) nil))
+                  ((symbol-function 'beads-worktree-orchestrator--setup-worker-scrollback)
+                   (lambda (path) (push path scrollback-calls))))
+          (let ((beads-worktree-orchestrator-post-ready-delay 0))
+            (beads-worktree-orchestrator-spawn-and-send-prompt
+             repo-root "feature-x" "do the thing")
+            (should (= 1 (length scrollback-calls)))))))))
+
+(ert-deftest bwo-test-spawn-and-send-prompt-warns-on-timeout ()
+  "Returns a warning string and does not call send-prompt when MCP times out."
+  (bwo-test--with-temp-dir root
+    (bwo-test--with-temp-dir repo-parent
+      (let* ((ai-code-git-worktree-root root)
+             (repo-root (expand-file-name "my-repo/" repo-parent))
+             (sent-prompts nil))
+        (make-directory repo-root t)
+        (bwo-test--git repo-root "init" "-q" "-b" "main" ".")
+        (bwo-test--git repo-root "config" "user.email" "test@example.com")
+        (bwo-test--git repo-root "config" "user.name" "Test")
+        (bwo-test--write-file (expand-file-name "f.txt" repo-root) "hi\n")
+        (bwo-test--git repo-root "add" "f.txt")
+        (bwo-test--git repo-root "commit" "-q" "-m" "init")
+        (cl-letf (((symbol-function 'beads-worktree-orchestrator--start-worker-session)
+                   (lambda () "session-started"))
+                  ((symbol-function 'require)
+                   (lambda (feature &rest _) feature))
+                  ((symbol-function 'claude-code-ide-mcp--get-session-for-project)
+                   (lambda (_dir) nil))
+                  ((symbol-function 'claude-code-ide-send-prompt)
+                   (lambda (p) (push p sent-prompts))))
+          (let ((beads-worktree-orchestrator-session-ready-timeout 0.6))
+            (let ((result (beads-worktree-orchestrator-spawn-and-send-prompt
+                           repo-root "feature-y" "do the thing")))
+              (should (null sent-prompts))
+              (should (string-match-p "WARNING" result))
+              (should (string-match-p "prompt not sent" result)))))))))
+
 (provide 'beads-worktree-orchestrator-test)
 
 ;;; beads-worktree-orchestrator-test.el ends here
