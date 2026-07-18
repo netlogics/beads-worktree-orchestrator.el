@@ -480,6 +480,9 @@ check inside `claude-code-ide--start-if-no-session')."
 
 ;; Stubs for MCP, send-prompt, and vterm APIs, which aren't loadable in batch context.
 
+(defvar vterm-copy-mode nil
+  "Stub variable; the real one is created by `define-minor-mode' in vterm.el.")
+
 (defun vterm-copy-mode (&optional _arg)
   "Stub; overridden per-test via `cl-letf'.")
 
@@ -555,17 +558,40 @@ check inside `claude-code-ide--start-if-no-session')."
            (buf (get-buffer-create "*bwo-test-vterm-fake*")))
       (unwind-protect
           (with-current-buffer buf
-            ;; Minimal stub: make it look like a vterm-mode buffer
             (let ((vterm-copy-mode nil))
               (cl-letf (((symbol-function 'derived-mode-p)
                          (lambda (mode &rest _) (eq mode 'vterm-mode)))
                         ((symbol-function 'claude-code-ide--get-buffer-name)
                          (lambda (_d) "*bwo-test-vterm-fake*")))
                 (beads-worktree-orchestrator--setup-worker-scrollback dir)
-                ;; After setup, <prior> should be buffer-locally bound.
                 (should (local-key-binding (kbd "<prior>")))
-                (should (local-key-binding (kbd "<next>"))))))
+                (should (local-key-binding (kbd "<next>")))
+                ;; Bindings point at the named helpers, not anonymous lambdas.
+                (should (eq (local-key-binding (kbd "<prior>"))
+                            #'beads-worktree-orchestrator--enter-scroll-mode))
+                (should (eq (local-key-binding (kbd "<next>"))
+                            #'beads-worktree-orchestrator--exit-scroll-mode)))))
         (kill-buffer buf)))))
+
+(ert-deftest bwo-test-enter-scroll-mode-calls-evil-normal-state ()
+  "enter-scroll-mode calls evil-normal-state when evil is available."
+  (let ((vterm-copy-mode nil)
+        (evil-called nil))
+    (cl-letf (((symbol-function 'vterm-copy-mode) (lambda (_) nil))
+              ((symbol-function 'scroll-down-command) (lambda () nil))
+              ((symbol-function 'evil-normal-state) (lambda () (setq evil-called t))))
+      (beads-worktree-orchestrator--enter-scroll-mode)
+      (should evil-called))))
+
+(ert-deftest bwo-test-exit-scroll-mode-calls-evil-insert-state-at-bottom ()
+  "exit-scroll-mode switches back to evil insert state when leaving copy-mode."
+  (let ((vterm-copy-mode t)
+        (insert-called nil))
+    (cl-letf (((symbol-function 'scroll-up-command) (lambda () (signal 'end-of-buffer nil)))
+              ((symbol-function 'vterm-copy-mode) (lambda (_) nil))
+              ((symbol-function 'evil-insert-state) (lambda () (setq insert-called t))))
+      (beads-worktree-orchestrator--exit-scroll-mode)
+      (should insert-called))))
 
 (ert-deftest bwo-test-setup-worker-scrollback-no-ops-when-buffer-missing ()
   "Silently does nothing when the session buffer doesn't exist."

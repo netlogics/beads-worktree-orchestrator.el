@@ -438,17 +438,52 @@ Returns a string describing the outcome."
 ;;; Worker session auditing (scrollable buffers + browse command)
 ;;; ---------------------------------------------------------------------
 
+(defun beads-worktree-orchestrator--enter-scroll-mode ()
+  "Enter vterm copy-mode and switch evil to normal state (if active).
+
+evil-collection sets vterm-mode's initial evil state to insert, where
+`C-f'/`C-b'/`j'/`k'/`G' etc. are forwarded to the terminal instead of
+acting as vim motion commands.  Switching to normal state here means all
+standard vim navigation keys work immediately after pressing PageUp."
+  (interactive)
+  (unless (bound-and-true-p vterm-copy-mode)
+    (vterm-copy-mode 1))
+  (when (fboundp 'evil-normal-state)
+    (evil-normal-state))
+  (scroll-down-command))
+
+(defun beads-worktree-orchestrator--exit-scroll-mode ()
+  "Scroll down in copy-mode; exit to live terminal when at the bottom.
+
+Exits vterm copy-mode and returns evil to insert state when scrolling
+past the bottom, mirroring `beads-worktree-orchestrator--enter-scroll-mode'."
+  (interactive)
+  (if (bound-and-true-p vterm-copy-mode)
+      (condition-case nil
+          (scroll-up-command)
+        (end-of-buffer
+         (vterm-copy-mode -1)
+         (when (fboundp 'evil-insert-state)
+           (evil-insert-state))))
+    (scroll-up-command)))
+
 (defun beads-worktree-orchestrator--setup-worker-scrollback (worktree-path)
   "Make plain PageUp/PageDown scroll the session buffer for WORKTREE-PATH.
 
 In a regular vterm buffer, PageUp/PageDown are forwarded to the running
 process (which ignores them in Claude Code), so you can only see the
 current screen.  This function installs buffer-local bindings that
-intercept those keys and enter `vterm-copy-mode' automatically, giving
-you normal Emacs scroll-back without needing to know about `C-c C-t'.
+intercept those keys, enter `vterm-copy-mode' automatically, and switch
+evil to normal state so that vim motion keys (`C-f', `C-b', `j', `k',
+`G', `gg', etc.) all work immediately.
 
-PageUp enters copy mode and scrolls up; PageDown scrolls down and exits
-copy mode automatically when it would scroll past the bottom.
+evil-collection sets vterm-mode's initial evil state to insert, where
+those keys are forwarded to the terminal.  Without the normal-state
+switch, pressing PageUp would enter copy-mode but vim navigation keys
+would still be sent to the terminal process and do nothing useful.
+
+Exit copy-mode and return to live input by pressing `C-c C-t' (standard
+vterm binding) or PageDown until the end of the buffer is reached.
 
 Silently no-ops when the session buffer doesn't exist yet or when the
 terminal backend is not vterm (eat has its own scroll story)."
@@ -459,22 +494,10 @@ terminal backend is not vterm (eat has its own scroll story)."
         (with-current-buffer buf
           (when (and (derived-mode-p 'vterm-mode)
                      (fboundp 'vterm-copy-mode))
-            (local-set-key
-             (kbd "<prior>")
-             (lambda ()
-               (interactive)
-               (unless (bound-and-true-p vterm-copy-mode)
-                 (vterm-copy-mode 1))
-               (scroll-down-command)))
-            (local-set-key
-             (kbd "<next>")
-             (lambda ()
-               (interactive)
-               (if (bound-and-true-p vterm-copy-mode)
-                   (condition-case nil
-                       (scroll-up-command)
-                     (end-of-buffer (vterm-copy-mode -1)))
-                 (scroll-up-command))))))))))
+            (local-set-key (kbd "<prior>")
+                           #'beads-worktree-orchestrator--enter-scroll-mode)
+            (local-set-key (kbd "<next>")
+                           #'beads-worktree-orchestrator--exit-scroll-mode)))))))
 
 ;;;###autoload
 (defun beads-worktree-orchestrator-browse-worker ()
@@ -515,7 +538,9 @@ Enter, then the worker's session is live again."
                     (when (and (derived-mode-p 'vterm-mode)
                                (fboundp 'vterm-copy-mode)
                                (not (bound-and-true-p vterm-copy-mode)))
-                      (vterm-copy-mode 1))))
+                      (vterm-copy-mode 1)
+                      (when (fboundp 'evil-normal-state)
+                        (evil-normal-state)))))
               (user-error "Buffer for %s no longer exists" choice))))))))
 
 ;;; ---------------------------------------------------------------------
