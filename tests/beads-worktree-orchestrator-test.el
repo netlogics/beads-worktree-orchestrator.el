@@ -478,7 +478,16 @@ check inside `claude-code-ide--start-if-no-session')."
 ;;; --wait-for-mcp-ready / spawn-and-send-prompt
 ;;; ---------------------------------------------------------------------
 
-;; Stubs for MCP and send-prompt APIs, which aren't loadable in batch context.
+;; Stubs for MCP, send-prompt, and vterm APIs, which aren't loadable in batch context.
+
+(defun vterm-copy-mode (&optional _arg)
+  "Stub; overridden per-test via `cl-letf'.")
+
+(defun claude-code-ide--get-buffer-name (&optional _directory)
+  "Stub; overridden per-test via `cl-letf'.")
+
+(defun claude-code-ide--display-buffer-in-side-window (_buffer)
+  "Stub; overridden per-test via `cl-letf'.")
 
 (defun claude-code-ide-mcp--get-session-for-project (_project-dir)
   "Stub; overridden per-test via `cl-letf'.")
@@ -538,6 +547,64 @@ check inside `claude-code-ide--start-if-no-session')."
                            repo-root "feature-x" "do the thing")))
               (should (equal sent-prompts '("do the thing")))
               (should (string-match-p "sent opening prompt" result)))))))))
+
+(ert-deftest bwo-test-setup-worker-scrollback-installs-keybindings ()
+  "PageUp/PageDown get buffer-local bindings in a vterm-mode worker buffer."
+  (bwo-test--with-temp-dir dir
+    (let* ((dir (file-name-as-directory dir))
+           (buf (get-buffer-create "*bwo-test-vterm-fake*")))
+      (unwind-protect
+          (with-current-buffer buf
+            ;; Minimal stub: make it look like a vterm-mode buffer
+            (let ((vterm-copy-mode nil))
+              (cl-letf (((symbol-function 'derived-mode-p)
+                         (lambda (mode &rest _) (eq mode 'vterm-mode)))
+                        ((symbol-function 'claude-code-ide--get-buffer-name)
+                         (lambda (_d) "*bwo-test-vterm-fake*")))
+                (beads-worktree-orchestrator--setup-worker-scrollback dir)
+                ;; After setup, <prior> should be buffer-locally bound.
+                (should (local-key-binding (kbd "<prior>")))
+                (should (local-key-binding (kbd "<next>"))))))
+        (kill-buffer buf)))))
+
+(ert-deftest bwo-test-setup-worker-scrollback-no-ops-when-buffer-missing ()
+  "Silently does nothing when the session buffer doesn't exist."
+  (cl-letf (((symbol-function 'claude-code-ide--get-buffer-name)
+             (lambda (_d) "*bwo-test-nonexistent-buffer*")))
+    ;; Should not signal an error.
+    (should (eq nil (beads-worktree-orchestrator--setup-worker-scrollback "/some/path/")))))
+
+(ert-deftest bwo-test-spawn-and-send-prompt-calls-setup-scrollback ()
+  "spawn-and-send-prompt calls --setup-worker-scrollback when MCP is ready."
+  (bwo-test--with-temp-dir root
+    (bwo-test--with-temp-dir repo-parent
+      (let* ((ai-code-git-worktree-root root)
+             (repo-root (expand-file-name "my-repo/" repo-parent))
+             (scrollback-calls nil)
+             (fake-session (make-bwo-test--fake-session :client 'mock-ws)))
+        (make-directory repo-root t)
+        (bwo-test--git repo-root "init" "-q" "-b" "main" ".")
+        (bwo-test--git repo-root "config" "user.email" "test@example.com")
+        (bwo-test--git repo-root "config" "user.name" "Test")
+        (bwo-test--write-file (expand-file-name "f.txt" repo-root) "hi\n")
+        (bwo-test--git repo-root "add" "f.txt")
+        (bwo-test--git repo-root "commit" "-q" "-m" "init")
+        (cl-letf (((symbol-function 'beads-worktree-orchestrator--start-worker-session)
+                   (lambda () "session-started"))
+                  ((symbol-function 'require)
+                   (lambda (feature &rest _) feature))
+                  ((symbol-function 'claude-code-ide-mcp--get-session-for-project)
+                   (lambda (_dir) fake-session))
+                  ((symbol-function 'claude-code-ide-mcp-session-client)
+                   (lambda (s) (bwo-test--fake-session-client s)))
+                  ((symbol-function 'claude-code-ide-send-prompt)
+                   (lambda (_p) nil))
+                  ((symbol-function 'beads-worktree-orchestrator--setup-worker-scrollback)
+                   (lambda (path) (push path scrollback-calls))))
+          (let ((beads-worktree-orchestrator-post-ready-delay 0))
+            (beads-worktree-orchestrator-spawn-and-send-prompt
+             repo-root "feature-x" "do the thing")
+            (should (= 1 (length scrollback-calls)))))))))
 
 (ert-deftest bwo-test-spawn-and-send-prompt-warns-on-timeout ()
   "Returns a warning string and does not call send-prompt when MCP times out."

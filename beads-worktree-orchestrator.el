@@ -127,8 +127,11 @@ bounded only by their own isolated git worktree."
 
 (declare-function claude-code-ide "claude-code-ide" (&optional arg))
 (declare-function claude-code-ide-send-prompt "claude-code-ide" (&optional prompt))
+(declare-function claude-code-ide--get-buffer-name "claude-code-ide" (&optional directory))
+(declare-function claude-code-ide--display-buffer-in-side-window "claude-code-ide" (buffer))
 (declare-function claude-code-ide-mcp--get-session-for-project "claude-code-ide-mcp" (project-dir))
 (declare-function claude-code-ide-mcp-session-client "claude-code-ide-mcp" (session))
+(declare-function vterm-copy-mode "vterm" (&optional arg))
 (declare-function ai-code--effective-backend "ai-code-backends" ())
 (declare-function ai-code--activate-effective-backend "ai-code-backends" ())
 (declare-function ai-code--remember-current-backend-for-repo "ai-code-backends" ())
@@ -399,6 +402,7 @@ Returns a string describing the outcome (spawn result + prompt delivery status).
         (progn
           (when (> beads-worktree-orchestrator-post-ready-delay 0)
             (sleep-for beads-worktree-orchestrator-post-ready-delay))
+          (beads-worktree-orchestrator--setup-worker-scrollback worktree-path)
           (claude-code-ide-send-prompt prompt)
           (format "%s; sent opening prompt (%d chars)" spawn-result (length prompt)))
       (format "%s; WARNING: MCP did not connect within %ss — prompt not sent, worker needs manual kick"
@@ -424,10 +428,95 @@ Returns a string describing the outcome."
         (progn
           (when (> beads-worktree-orchestrator-post-ready-delay 0)
             (sleep-for beads-worktree-orchestrator-post-ready-delay))
+          (beads-worktree-orchestrator--setup-worker-scrollback worktree-path)
           (claude-code-ide-send-prompt prompt)
           (format "%s; sent opening prompt (%d chars)" spawn-result (length prompt)))
       (format "%s; WARNING: MCP did not connect within %ss — prompt not sent, worker needs manual kick"
               spawn-result beads-worktree-orchestrator-session-ready-timeout))))
+
+;;; ---------------------------------------------------------------------
+;;; Worker session auditing (scrollable buffers + browse command)
+;;; ---------------------------------------------------------------------
+
+(defun beads-worktree-orchestrator--setup-worker-scrollback (worktree-path)
+  "Make plain PageUp/PageDown scroll the session buffer for WORKTREE-PATH.
+
+In a regular vterm buffer, PageUp/PageDown are forwarded to the running
+process (which ignores them in Claude Code), so you can only see the
+current screen.  This function installs buffer-local bindings that
+intercept those keys and enter `vterm-copy-mode' automatically, giving
+you normal Emacs scroll-back without needing to know about `C-c C-t'.
+
+PageUp enters copy mode and scrolls up; PageDown scrolls down and exits
+copy mode automatically when it would scroll past the bottom.
+
+Silently no-ops when the session buffer doesn't exist yet or when the
+terminal backend is not vterm (eat has its own scroll story)."
+  (when (fboundp 'claude-code-ide--get-buffer-name)
+    (let* ((dir (file-name-as-directory (expand-file-name worktree-path)))
+           (buf (get-buffer (claude-code-ide--get-buffer-name dir))))
+      (when (and buf (buffer-live-p buf))
+        (with-current-buffer buf
+          (when (and (derived-mode-p 'vterm-mode)
+                     (fboundp 'vterm-copy-mode))
+            (local-set-key
+             (kbd "<prior>")
+             (lambda ()
+               (interactive)
+               (unless (bound-and-true-p vterm-copy-mode)
+                 (vterm-copy-mode 1))
+               (scroll-down-command)))
+            (local-set-key
+             (kbd "<next>")
+             (lambda ()
+               (interactive)
+               (if (bound-and-true-p vterm-copy-mode)
+                   (condition-case nil
+                       (scroll-up-command)
+                     (end-of-buffer (vterm-copy-mode -1)))
+                 (scroll-up-command))))))))))
+
+;;;###autoload
+(defun beads-worktree-orchestrator-browse-worker ()
+  "Switch to a worker session buffer and enter scroll mode for auditing.
+
+Presents only sessions whose directory is under `ai-code-git-worktree-root'
+(i.e. sessions spawned by this orchestrator, not the main project session),
+so you don't accidentally navigate away from your own session.  After
+switching, enters `vterm-copy-mode' so PageUp/PageDown work immediately
+without any extra keystrokes.
+
+Exit copy mode with `C-c C-t' (standard vterm binding) or by pressing
+Enter, then the worker's session is live again."
+  (interactive)
+  (unless (boundp 'claude-code-ide--processes)
+    (user-error "claude-code-ide is not loaded"))
+  (unless (bound-and-true-p ai-code-git-worktree-root)
+    (user-error "ai-code-git-worktree-root is not set"))
+  (let* ((wt-root (file-name-as-directory (expand-file-name ai-code-git-worktree-root)))
+         (workers nil))
+    (maphash (lambda (directory _process)
+               (when (string-prefix-p wt-root (file-name-as-directory
+                                               (expand-file-name directory)))
+                 (push (cons (abbreviate-file-name directory) directory) workers)))
+             claude-code-ide--processes)
+    (if (null workers)
+        (message "No active worker sessions under %s" (abbreviate-file-name wt-root))
+      (let* ((choice (completing-read "Browse worker session: " workers nil t))
+             (directory (alist-get choice workers nil nil #'string=)))
+        (when directory
+          (let* ((dir (file-name-as-directory (expand-file-name directory)))
+                 (buf-name (claude-code-ide--get-buffer-name dir))
+                 (buf (get-buffer buf-name)))
+            (if (and buf (buffer-live-p buf))
+                (progn
+                  (claude-code-ide--display-buffer-in-side-window buf)
+                  (with-current-buffer buf
+                    (when (and (derived-mode-p 'vterm-mode)
+                               (fboundp 'vterm-copy-mode)
+                               (not (bound-and-true-p vterm-copy-mode)))
+                      (vterm-copy-mode 1))))
+              (user-error "Buffer for %s no longer exists" choice))))))))
 
 ;;; ---------------------------------------------------------------------
 ;;; Install / upgrade state
