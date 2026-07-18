@@ -474,6 +474,100 @@ check inside `claude-code-ide--start-if-no-session')."
                      (lambda (feature &rest _) feature)))
             (should-error (beads-worktree-orchestrator-spawn-reviewer repo-root "main"))))))))
 
+;;; ---------------------------------------------------------------------
+;;; --wait-for-mcp-ready / spawn-and-send-prompt
+;;; ---------------------------------------------------------------------
+
+;; Stubs for MCP and send-prompt APIs, which aren't loadable in batch context.
+
+(defun claude-code-ide-mcp--get-session-for-project (_project-dir)
+  "Stub; overridden per-test via `cl-letf'.")
+
+(cl-defstruct bwo-test--fake-session client)
+
+(defun claude-code-ide-mcp-session-client (_session)
+  "Stub; overridden per-test via `cl-letf'.")
+
+(defun claude-code-ide-send-prompt (&optional _prompt)
+  "Stub; overridden per-test via `cl-letf'.")
+
+(ert-deftest bwo-test-wait-for-mcp-ready-times-out ()
+  "Returns nil when no MCP session appears within the timeout."
+  (cl-letf (((symbol-function 'claude-code-ide-mcp--get-session-for-project)
+             (lambda (_dir) nil)))
+    (let ((beads-worktree-orchestrator-session-ready-timeout 0.6))
+      (should-not (beads-worktree-orchestrator--wait-for-mcp-ready "/some/path/")))))
+
+(ert-deftest bwo-test-wait-for-mcp-ready-returns-t-when-already-ready ()
+  "Returns t immediately when MCP session already has a live client."
+  (let* ((fake-session (make-bwo-test--fake-session :client 'mock-ws)))
+    (cl-letf (((symbol-function 'claude-code-ide-mcp--get-session-for-project)
+               (lambda (_dir) fake-session))
+              ((symbol-function 'claude-code-ide-mcp-session-client)
+               (lambda (s) (bwo-test--fake-session-client s))))
+      (let ((beads-worktree-orchestrator-session-ready-timeout 5))
+        (should (beads-worktree-orchestrator--wait-for-mcp-ready "/some/path/"))))))
+
+(ert-deftest bwo-test-spawn-and-send-prompt-sends-prompt-when-ready ()
+  "Sends the prompt via `claude-code-ide-send-prompt' when MCP becomes ready."
+  (bwo-test--with-temp-dir root
+    (bwo-test--with-temp-dir repo-parent
+      (let* ((ai-code-git-worktree-root root)
+             (repo-root (expand-file-name "my-repo/" repo-parent))
+             (sent-prompts nil)
+             (fake-session (make-bwo-test--fake-session :client 'mock-ws)))
+        (make-directory repo-root t)
+        (bwo-test--git repo-root "init" "-q" "-b" "main" ".")
+        (bwo-test--git repo-root "config" "user.email" "test@example.com")
+        (bwo-test--git repo-root "config" "user.name" "Test")
+        (bwo-test--write-file (expand-file-name "f.txt" repo-root) "hi\n")
+        (bwo-test--git repo-root "add" "f.txt")
+        (bwo-test--git repo-root "commit" "-q" "-m" "init")
+        (cl-letf (((symbol-function 'beads-worktree-orchestrator--start-worker-session)
+                   (lambda () "session-started"))
+                  ((symbol-function 'require)
+                   (lambda (feature &rest _) feature))
+                  ((symbol-function 'claude-code-ide-mcp--get-session-for-project)
+                   (lambda (_dir) fake-session))
+                  ((symbol-function 'claude-code-ide-mcp-session-client)
+                   (lambda (s) (bwo-test--fake-session-client s)))
+                  ((symbol-function 'claude-code-ide-send-prompt)
+                   (lambda (p) (push p sent-prompts))))
+          (let ((beads-worktree-orchestrator-post-ready-delay 0))
+            (let ((result (beads-worktree-orchestrator-spawn-and-send-prompt
+                           repo-root "feature-x" "do the thing")))
+              (should (equal sent-prompts '("do the thing")))
+              (should (string-match-p "sent opening prompt" result)))))))))
+
+(ert-deftest bwo-test-spawn-and-send-prompt-warns-on-timeout ()
+  "Returns a warning string and does not call send-prompt when MCP times out."
+  (bwo-test--with-temp-dir root
+    (bwo-test--with-temp-dir repo-parent
+      (let* ((ai-code-git-worktree-root root)
+             (repo-root (expand-file-name "my-repo/" repo-parent))
+             (sent-prompts nil))
+        (make-directory repo-root t)
+        (bwo-test--git repo-root "init" "-q" "-b" "main" ".")
+        (bwo-test--git repo-root "config" "user.email" "test@example.com")
+        (bwo-test--git repo-root "config" "user.name" "Test")
+        (bwo-test--write-file (expand-file-name "f.txt" repo-root) "hi\n")
+        (bwo-test--git repo-root "add" "f.txt")
+        (bwo-test--git repo-root "commit" "-q" "-m" "init")
+        (cl-letf (((symbol-function 'beads-worktree-orchestrator--start-worker-session)
+                   (lambda () "session-started"))
+                  ((symbol-function 'require)
+                   (lambda (feature &rest _) feature))
+                  ((symbol-function 'claude-code-ide-mcp--get-session-for-project)
+                   (lambda (_dir) nil))
+                  ((symbol-function 'claude-code-ide-send-prompt)
+                   (lambda (p) (push p sent-prompts))))
+          (let ((beads-worktree-orchestrator-session-ready-timeout 0.6))
+            (let ((result (beads-worktree-orchestrator-spawn-and-send-prompt
+                           repo-root "feature-y" "do the thing")))
+              (should (null sent-prompts))
+              (should (string-match-p "WARNING" result))
+              (should (string-match-p "prompt not sent" result)))))))))
+
 (provide 'beads-worktree-orchestrator-test)
 
 ;;; beads-worktree-orchestrator-test.el ends here
