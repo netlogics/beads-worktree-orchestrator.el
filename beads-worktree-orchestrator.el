@@ -126,15 +126,14 @@ bounded only by their own isolated git worktree."
                         (concat "refs/heads/" branch))))
 
 (declare-function claude-code-ide "claude-code-ide" (&optional arg))
-(declare-function claude-code-ide-send-prompt "claude-code-ide" (&optional prompt))
 (declare-function claude-code-ide--get-buffer-name "claude-code-ide" (&optional directory))
 (declare-function claude-code-ide--display-buffer-in-side-window "claude-code-ide" (buffer))
-(declare-function claude-code-ide-mcp--get-session-for-project "claude-code-ide-mcp" (project-dir))
-(declare-function claude-code-ide-mcp-session-client "claude-code-ide-mcp" (session))
 (declare-function vterm-copy-mode "vterm" (&optional arg))
 (declare-function ai-code--effective-backend "ai-code-backends" ())
 (declare-function ai-code--activate-effective-backend "ai-code-backends" ())
 (declare-function ai-code--remember-current-backend-for-repo "ai-code-backends" ())
+(declare-function ai-code-cli-session-ready-p "ai-code-backends" (dir))
+(declare-function ai-code-cli-send-command "ai-code-backends" (&optional command))
 
 (defun beads-worktree-orchestrator--claude-code-ide-active-p ()
   "Non-nil if the effective `ai-code' backend is `claude-code-ide'.
@@ -358,23 +357,20 @@ from landing before that rendering completes."
   :group 'beads-worktree-orchestrator)
 
 (defun beads-worktree-orchestrator--wait-for-mcp-ready (worktree-path)
-  "Block until the Claude Code session in WORKTREE-PATH has a live MCP connection.
-Polls every 0.5 s up to `beads-worktree-orchestrator-session-ready-timeout'
-seconds.  Returns t if the session became ready, nil if it timed out.
+  "Block until the session in WORKTREE-PATH is ready to accept input.
+Polls `ai-code-cli-session-ready-p' every 0.5 s up to
+`beads-worktree-orchestrator-session-ready-timeout' seconds.  Returns t if
+the session became ready, nil if it timed out.
 
-Readiness means `claude-code-ide-mcp-session-client' is non-nil for the
-session keyed by WORKTREE-PATH — that field is set when the Claude process
-opens its MCP WebSocket back to Emacs, which is the last step of startup
-and the point at which the terminal is ready to accept typed input."
-  (unless (fboundp 'claude-code-ide-mcp--get-session-for-project)
-    (user-error "claude-code-ide-mcp is not available"))
+For backends that do not define a :ready predicate,
+`ai-code-cli-session-ready-p' returns t immediately and this function
+returns t on the first poll without waiting."
   (let ((deadline (+ (float-time) beads-worktree-orchestrator-session-ready-timeout))
         (dir (file-name-as-directory (expand-file-name worktree-path)))
         (ready nil))
     (while (and (not ready) (< (float-time) deadline))
-      (when-let ((session (claude-code-ide-mcp--get-session-for-project dir)))
-        (when (claude-code-ide-mcp-session-client session)
-          (setq ready t)))
+      (when (ai-code-cli-session-ready-p dir)
+        (setq ready t))
       (unless ready (sleep-for 0.5)))
     ready))
 
@@ -383,12 +379,11 @@ and the point at which the terminal is ready to accept typed input."
   "Create worktree for BRANCH, start a session, wait until ready, then send PROMPT.
 
 Combines `beads-worktree-orchestrator-spawn-agent-worktree' with a
-readiness wait and `claude-code-ide-send-prompt'.  The wait polls for
-the MCP WebSocket to connect (see `beads-worktree-orchestrator--wait-for-mcp-ready'),
-which is the signal that Claude Code has finished starting and its terminal
-is ready to accept typed input.  Without this wait the prompt text is
-sometimes entered but never submitted because send-return arrives before
-Claude's input loop is running.
+readiness wait (see `beads-worktree-orchestrator--wait-for-mcp-ready') and
+`ai-code-cli-send-command'.  The wait polls the active backend's readiness
+predicate until the session is ready to accept typed input.  Without this
+wait the prompt text is sometimes entered but never submitted because
+send-return arrives before the session's input loop is running.
 
 START-POINT, if given, is the ref the new branch is created from.
 Returns a string describing the outcome (spawn result + prompt delivery status)."
@@ -403,9 +398,9 @@ Returns a string describing the outcome (spawn result + prompt delivery status).
           (when (> beads-worktree-orchestrator-post-ready-delay 0)
             (sleep-for beads-worktree-orchestrator-post-ready-delay))
           (beads-worktree-orchestrator--setup-worker-scrollback worktree-path)
-          (claude-code-ide-send-prompt prompt)
+          (ai-code-cli-send-command prompt)
           (format "%s; sent opening prompt (%d chars)" spawn-result (length prompt)))
-      (format "%s; WARNING: MCP did not connect within %ss — prompt not sent, worker needs manual kick"
+      (format "%s; WARNING: session did not become ready within %ss — prompt not sent, worker needs manual kick"
               spawn-result beads-worktree-orchestrator-session-ready-timeout))))
 
 ;;;###autoload
@@ -429,9 +424,9 @@ Returns a string describing the outcome."
           (when (> beads-worktree-orchestrator-post-ready-delay 0)
             (sleep-for beads-worktree-orchestrator-post-ready-delay))
           (beads-worktree-orchestrator--setup-worker-scrollback worktree-path)
-          (claude-code-ide-send-prompt prompt)
+          (ai-code-cli-send-command prompt)
           (format "%s; sent opening prompt (%d chars)" spawn-result (length prompt)))
-      (format "%s; WARNING: MCP did not connect within %ss — prompt not sent, worker needs manual kick"
+      (format "%s; WARNING: session did not become ready within %ss — prompt not sent, worker needs manual kick"
               spawn-result beads-worktree-orchestrator-session-ready-timeout))))
 
 ;;; ---------------------------------------------------------------------
