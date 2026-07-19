@@ -492,42 +492,33 @@ check inside `claude-code-ide--start-if-no-session')."
 (defun claude-code-ide--display-buffer-in-side-window (_buffer)
   "Stub; overridden per-test via `cl-letf'.")
 
-(defun claude-code-ide-mcp--get-session-for-project (_project-dir)
+(defun ai-code-cli-session-ready-p (_dir)
   "Stub; overridden per-test via `cl-letf'.")
 
-(cl-defstruct bwo-test--fake-session client)
-
-(defun claude-code-ide-mcp-session-client (_session)
-  "Stub; overridden per-test via `cl-letf'.")
-
-(defun claude-code-ide-send-prompt (&optional _prompt)
+(defun ai-code-cli-send-command (&optional _command)
   "Stub; overridden per-test via `cl-letf'.")
 
 (ert-deftest bwo-test-wait-for-mcp-ready-times-out ()
-  "Returns nil when no MCP session appears within the timeout."
-  (cl-letf (((symbol-function 'claude-code-ide-mcp--get-session-for-project)
+  "Returns nil when the backend readiness predicate never returns non-nil."
+  (cl-letf (((symbol-function 'ai-code-cli-session-ready-p)
              (lambda (_dir) nil)))
     (let ((beads-worktree-orchestrator-session-ready-timeout 0.6))
       (should-not (beads-worktree-orchestrator--wait-for-mcp-ready "/some/path/")))))
 
 (ert-deftest bwo-test-wait-for-mcp-ready-returns-t-when-already-ready ()
-  "Returns t immediately when MCP session already has a live client."
-  (let* ((fake-session (make-bwo-test--fake-session :client 'mock-ws)))
-    (cl-letf (((symbol-function 'claude-code-ide-mcp--get-session-for-project)
-               (lambda (_dir) fake-session))
-              ((symbol-function 'claude-code-ide-mcp-session-client)
-               (lambda (s) (bwo-test--fake-session-client s))))
-      (let ((beads-worktree-orchestrator-session-ready-timeout 5))
-        (should (beads-worktree-orchestrator--wait-for-mcp-ready "/some/path/"))))))
+  "Returns t immediately when the backend readiness predicate is satisfied."
+  (cl-letf (((symbol-function 'ai-code-cli-session-ready-p)
+             (lambda (_dir) t)))
+    (let ((beads-worktree-orchestrator-session-ready-timeout 5))
+      (should (beads-worktree-orchestrator--wait-for-mcp-ready "/some/path/")))))
 
 (ert-deftest bwo-test-spawn-and-send-prompt-sends-prompt-when-ready ()
-  "Sends the prompt via `claude-code-ide-send-prompt' when MCP becomes ready."
+  "Sends the prompt via `ai-code-cli-send-command' when the session becomes ready."
   (bwo-test--with-temp-dir root
     (bwo-test--with-temp-dir repo-parent
       (let* ((ai-code-git-worktree-root root)
              (repo-root (expand-file-name "my-repo/" repo-parent))
-             (sent-prompts nil)
-             (fake-session (make-bwo-test--fake-session :client 'mock-ws)))
+             (sent-prompts nil))
         (make-directory repo-root t)
         (bwo-test--git repo-root "init" "-q" "-b" "main" ".")
         (bwo-test--git repo-root "config" "user.email" "test@example.com")
@@ -539,11 +530,9 @@ check inside `claude-code-ide--start-if-no-session')."
                    (lambda () "session-started"))
                   ((symbol-function 'require)
                    (lambda (feature &rest _) feature))
-                  ((symbol-function 'claude-code-ide-mcp--get-session-for-project)
-                   (lambda (_dir) fake-session))
-                  ((symbol-function 'claude-code-ide-mcp-session-client)
-                   (lambda (s) (bwo-test--fake-session-client s)))
-                  ((symbol-function 'claude-code-ide-send-prompt)
+                  ((symbol-function 'ai-code-cli-session-ready-p)
+                   (lambda (_dir) t))
+                  ((symbol-function 'ai-code-cli-send-command)
                    (lambda (p) (push p sent-prompts))))
           (let ((beads-worktree-orchestrator-post-ready-delay 0))
             (let ((result (beads-worktree-orchestrator-spawn-and-send-prompt
@@ -601,13 +590,12 @@ check inside `claude-code-ide--start-if-no-session')."
     (should (eq nil (beads-worktree-orchestrator--setup-worker-scrollback "/some/path/")))))
 
 (ert-deftest bwo-test-spawn-and-send-prompt-calls-setup-scrollback ()
-  "spawn-and-send-prompt calls --setup-worker-scrollback when MCP is ready."
+  "spawn-and-send-prompt calls --setup-worker-scrollback when session is ready."
   (bwo-test--with-temp-dir root
     (bwo-test--with-temp-dir repo-parent
       (let* ((ai-code-git-worktree-root root)
              (repo-root (expand-file-name "my-repo/" repo-parent))
-             (scrollback-calls nil)
-             (fake-session (make-bwo-test--fake-session :client 'mock-ws)))
+             (scrollback-calls nil))
         (make-directory repo-root t)
         (bwo-test--git repo-root "init" "-q" "-b" "main" ".")
         (bwo-test--git repo-root "config" "user.email" "test@example.com")
@@ -619,11 +607,9 @@ check inside `claude-code-ide--start-if-no-session')."
                    (lambda () "session-started"))
                   ((symbol-function 'require)
                    (lambda (feature &rest _) feature))
-                  ((symbol-function 'claude-code-ide-mcp--get-session-for-project)
-                   (lambda (_dir) fake-session))
-                  ((symbol-function 'claude-code-ide-mcp-session-client)
-                   (lambda (s) (bwo-test--fake-session-client s)))
-                  ((symbol-function 'claude-code-ide-send-prompt)
+                  ((symbol-function 'ai-code-cli-session-ready-p)
+                   (lambda (_dir) t))
+                  ((symbol-function 'ai-code-cli-send-command)
                    (lambda (_p) nil))
                   ((symbol-function 'beads-worktree-orchestrator--setup-worker-scrollback)
                    (lambda (path) (push path scrollback-calls))))
@@ -633,7 +619,7 @@ check inside `claude-code-ide--start-if-no-session')."
             (should (= 1 (length scrollback-calls)))))))))
 
 (ert-deftest bwo-test-spawn-and-send-prompt-warns-on-timeout ()
-  "Returns a warning string and does not call send-prompt when MCP times out."
+  "Returns a warning string and does not call send-command when session times out."
   (bwo-test--with-temp-dir root
     (bwo-test--with-temp-dir repo-parent
       (let* ((ai-code-git-worktree-root root)
@@ -650,9 +636,9 @@ check inside `claude-code-ide--start-if-no-session')."
                    (lambda () "session-started"))
                   ((symbol-function 'require)
                    (lambda (feature &rest _) feature))
-                  ((symbol-function 'claude-code-ide-mcp--get-session-for-project)
+                  ((symbol-function 'ai-code-cli-session-ready-p)
                    (lambda (_dir) nil))
-                  ((symbol-function 'claude-code-ide-send-prompt)
+                  ((symbol-function 'ai-code-cli-send-command)
                    (lambda (p) (push p sent-prompts))))
           (let ((beads-worktree-orchestrator-session-ready-timeout 0.6))
             (let ((result (beads-worktree-orchestrator-spawn-and-send-prompt
