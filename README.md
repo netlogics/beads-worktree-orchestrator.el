@@ -27,6 +27,7 @@ You need all of these installed and working *before* this skill will do anything
 | [ai-code-interface.el](https://github.com/tninja/ai-code-interface.el) | provides `ai-code-cli-start`, the backend-agnostic dispatcher the bundled spawn function calls; pick a backend with `ai-code-set-backend` (e.g. `'claude-code-ide`, which additionally requires [claude-code-ide.el](https://github.com/manzaltu/claude-code-ide.el)) |
 | Worktree-spawn function in your Emacs config | bundled in this repo as `my/spawn-agent-worktree` (`beads-worktree-orchestrator.el`) — load it in your config; given a repo root and branch name, it creates the worktree under `ai-code-git-worktree-root` (the same location `ai-code-git-worktree-branch` uses for worktrees created by hand, intentionally — one worktree root, not two conventions) and calls `ai-code-cli-start` in it |
 | [MCP Agent Mail](https://github.com/Dicklesworthstone/mcp_agent_mail) | installed and configured in your agent's MCP settings; the one-line installer is `curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/mcp_agent_mail/main/scripts/install.sh \| bash -s -- --yes` |
+| Dedicated coordination hub *(optional)* | a dedicated beads DB for tasks that span multiple repos — see [Cross-project coordination](#cross-project-coordination) for how to create one |
 
 If any of these are missing, the skill will stop and tell you what's missing rather than guessing or silently degrading — except that if Agent Mail specifically isn't set up, you can explicitly ask it to fall back to Beads-only coordination for that run.
 
@@ -85,6 +86,45 @@ Once enabled, only spawned-worker sessions are affected — your own manual `ai-
 - Never double-claims a bead that already has an assignee.
 - If Emacs or Agent Mail calls fail outright, it stops and shows you the exact error rather than working around it silently.
 - Stuck agents (no bd/git/mail activity for a long time) are reported to you, not auto-killed.
+
+## Cross-project coordination
+
+Each project keeps its own beads database under `.beads/` — agents on different repos never share it. When tasks span multiple repos (an epic touching `project-a` and `project-b`, or handoffs across repo boundaries), create a **dedicated coordination hub**: a repo with no source code whose only job is to host a beads DB.
+
+**Option A — [DoltHub](https://www.dolthub.com) (recommended, follows beads defaults):**
+
+DoltHub is Dolt's cloud hosting and handles concurrent agent pushes with merge semantics — better than git for high-contention writes. Create a database at dolthub.com, then:
+
+```bash
+mkdir ~/dev/beads-hub && cd ~/dev/beads-hub
+git init && git checkout -b main
+bd init --prefix=hub
+bd config set sync.remote dolthub://your-org/beads-hub
+bd dolt push
+```
+
+**Option B — self-hosted git remote:**
+
+```bash
+# Create an empty repo on GitHub/GitLab/Gitea (e.g. your-org/beads-hub)
+mkdir ~/dev/beads-hub && cd ~/dev/beads-hub
+git init && git checkout -b main
+bd init --prefix=hub
+bd config set sync.remote git+ssh://git@github.com/your-org/beads-hub.git
+git remote add origin git@github.com:your-org/beads-hub.git
+bd dolt push
+git push -u origin main
+```
+
+**Daily workflow (either option):**
+
+```bash
+cd ~/dev/beads-hub && bd dolt pull   # pull latest before reading/creating
+bd create --title="..." --type=feature
+bd dolt push                          # push so other agents see it
+```
+
+Link per-project issues to hub epics with `bd dep add project-xxx hub-yyy`. The orchestrator checks the hub when cross-project status is requested but defaults to the current project's DB otherwise — agents don't need the hub unless cross-project work is in scope.
 
 ## What this is *not*
 
