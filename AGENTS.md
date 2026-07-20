@@ -23,10 +23,6 @@ bd close <id>         # Complete work
 bd dolt push          # Push beads data to remote
 ```
 
-## Cross-project coordination
-
-For tasks spanning multiple repos, a dedicated coordination hub beads DB can be used alongside this project's own beads DB. When working cross-project, `cd` to the hub directory and run `bd dolt pull` before reading or creating issues there, and `bd dolt push` after. See the README for setup instructions. Per-project work never requires the hub.
-
 ## Non-Interactive Shell Commands
 
 **ALWAYS use non-interactive flags** with file operations to avoid hanging on confirmation prompts.
